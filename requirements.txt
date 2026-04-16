@@ -1,10 +1,9 @@
 requests>=2.31.0
 pandas>=2.0.0
-openai>=1.0.0
-langgraph>=0.0.40
-langchain>=0.1.0
+google-genai>=0.8.0
+ddgs>=0.1.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 python-multipart>=0.0.6
-
+openpyxl>=3.1.0

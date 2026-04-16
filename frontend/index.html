@@ -1,108 +1,321 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Research Tool</title>
-    <link rel="stylesheet" href="/static/styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StockLens — AI Research Terminal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>📊 Stock Research Tool</h1>
-            <p>AI-Powered Company Analysis & Investment Recommendations</p>
-        </header>
 
-        <!-- Navigation Tabs -->
-        <div class="tabs">
-            <button class="tab-btn active" onclick="showTab('companies')">Ranked Companies</button>
-            <button class="tab-btn" onclick="showTab('algorithm')">Scoring Algorithm</button>
-            <button class="tab-btn" onclick="showTab('research')">Research Analysis</button>
-        </div>
-
-        <!-- Companies Tab -->
-        <div id="companies-tab" class="tab-content active">
-            <div class="section-header">
-                <h2>Ranked Companies</h2>
-                <div class="controls">
-                    <label>Show Top: </label>
-                    <select id="top-n-select" onchange="loadCompanies()">
-                        <option value="">All</option>
-                        <option value="20" selected>Top 20</option>
-                        <option value="50">Top 50</option>
-                        <option value="100">Top 100</option>
-                    </select>
-                    <button onclick="loadCompanies()" class="btn-primary">Refresh</button>
-                </div>
-            </div>
-            
-            <div class="loading" id="companies-loading">Loading companies...</div>
-            <div id="companies-table-container"></div>
-        </div>
-
-        <!-- Algorithm Tab -->
-        <div id="algorithm-tab" class="tab-content">
-            <div class="section-header">
-                <h2>Scoring Algorithm</h2>
-            </div>
-            <div id="algorithm-content" class="loading">Loading algorithm details...</div>
-        </div>
-
-        <!-- Research Tab -->
-        <div id="research-tab" class="tab-content">
-            <div class="section-header">
-                <h2>Research Analysis</h2>
-            </div>
-            
-            <div class="research-form">
-                <div class="form-group">
-                    <label>Select Company:</label>
-                    <select id="company-select" onchange="updateCompanyName()">
-                        <option value="">-- Select a company --</option>
-                    </select>
-                    <input type="text" id="company-name-input" placeholder="Or enter company name manually" onchange="updateCompanySelect()">
-                </div>
-                <button onclick="startResearch()" class="btn-primary btn-large" id="start-research-btn">
-                    🚀 Start Research
-                </button>
-            </div>
-
-            <div id="research-status-container" style="display: none;">
-                <div class="status-header">
-                    <h3>Research Status</h3>
-                    <div id="research-id-display"></div>
-                </div>
-                
-                <div class="progress-container">
-                    <div class="progress-bar">
-                        <div id="progress-fill" class="progress-fill"></div>
-                    </div>
-                    <div id="progress-text" class="progress-text">Initializing...</div>
-                </div>
-
-                <div class="steps-container" id="steps-container">
-                    <!-- Steps will be populated dynamically -->
-                </div>
-
-                <div id="detailed-progress" class="detailed-progress" style="display: none;">
-                    <h4>Detailed Progress</h4>
-                    <div id="detailed-progress-content"></div>
-                </div>
-
-                <div id="results-container" style="display: none;">
-                    <div class="results-summary" id="results-summary"></div>
-                    <div class="results-actions">
-                        <button onclick="downloadReport()" class="btn-primary">📥 Download Report</button>
-                        <button onclick="viewReport()" class="btn-secondary">👁️ View Report</button>
-                    </div>
-                    <div id="report-preview" class="report-preview markdown-content"></div>
-                </div>
-            </div>
-        </div>
+<!-- ─── HEADER ─────────────────────────────────────────────────────── -->
+<header class="app-header">
+  <div class="header-inner">
+    <div class="logo">
+      <span class="logo-icon">◈</span>
+      <div>
+        <span class="logo-name">StockLens</span>
+        <span class="logo-tag">AI Research Terminal</span>
+      </div>
     </div>
 
-    <script src="/static/script.js"></script>
+    <div class="header-meta">
+      <!-- key status pill -->
+      <div class="key-status-pill" id="keyStatusPill" title="Click to manage API key">
+        <span class="ks-dot" id="ksDot"></span>
+        <span class="ks-label" id="ksLabel">Checking…</span>
+      </div>
+
+      <!-- token counter widget -->
+      <button class="token-widget" id="tokenWidget" title="Token usage — click for details">
+        <span class="tw-icon">◑</span>
+        <span class="tw-count" id="twCount">0</span>
+        <span class="tw-label">tokens</span>
+      </button>
+
+      <div class="badge-model" id="badgeModel">gemini-2.5-flash</div>
+
+      <button class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
+      <button class="icon-btn" id="themeToggle" title="Toggle theme">☀</button>
+    </div>
+  </div>
+</header>
+
+<!-- ─── SETTINGS DRAWER ────────────────────────────────────────────── -->
+<div class="drawer-overlay" id="drawerOverlay"></div>
+<aside class="settings-drawer" id="settingsDrawer">
+  <div class="drawer-header">
+    <span>⚙ Settings</span>
+    <button class="icon-btn" id="drawerClose">✕</button>
+  </div>
+
+  <!-- API Key Section -->
+  <div class="drawer-section">
+    <div class="ds-title">Gemini API Key</div>
+    <div class="ds-desc">
+      Enter a Google AI Studio key. The system will verify it and reinitialise immediately.
+    </div>
+
+    <div class="key-current">
+      <span class="kc-label">Active key:</span>
+      <code class="kc-value" id="kcValue">—</code>
+      <span class="kc-status" id="kcStatus"></span>
+    </div>
+
+    <div class="key-input-wrap">
+      <input type="password" id="keyInput" placeholder="AIza…" autocomplete="off" spellcheck="false" />
+      <button class="icon-btn" id="keyToggleVis" title="Show/hide key">👁</button>
+    </div>
+
+    <button class="btn btn-primary btn-full" id="saveKeyBtn">
+      <span id="saveKeyBtnText">✓ Verify &amp; Apply</span>
+    </button>
+
+    <div class="key-feedback" id="keyFeedback" style="display:none"></div>
+
+    <!-- restart animation placeholder -->
+    <div class="restart-indicator" id="restartIndicator" style="display:none">
+      <div class="ri-spinner"></div>
+      <span id="riMsg">Restarting system…</span>
+    </div>
+  </div>
+
+  <!-- Token Usage Section -->
+  <div class="drawer-section">
+    <div class="ds-title">Token Usage (this session)</div>
+    <div class="token-breakdown" id="tokenBreakdown">
+      <div class="tb-row">
+        <span class="tb-label">Input tokens</span>
+        <span class="tb-val" id="tbInput">0</span>
+      </div>
+      <div class="tb-row">
+        <span class="tb-label">Output tokens</span>
+        <span class="tb-val" id="tbOutput">0</span>
+      </div>
+      <div class="tb-row tb-total">
+        <span class="tb-label">Total tokens</span>
+        <span class="tb-val" id="tbTotal">0</span>
+      </div>
+      <div class="tb-row">
+        <span class="tb-label">API calls</span>
+        <span class="tb-val" id="tbCalls">0</span>
+      </div>
+      <div class="tb-row">
+        <span class="tb-label">Research sessions</span>
+        <span class="tb-val" id="tbSessions">0</span>
+      </div>
+    </div>
+    <div class="token-bar-wrap">
+      <div class="token-bar-track">
+        <div class="token-bar-fill" id="tokenBarFill" style="width:0%"></div>
+      </div>
+      <div class="token-bar-legend">
+        <span id="tokenBarUsed">0</span>
+        <span style="color:var(--text3)">/ ~250K soft limit</span>
+      </div>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="resetTokensBtn" style="margin-top:10px">↺ Reset Counter</button>
+  </div>
+
+  <!-- Model info -->
+  <div class="drawer-section">
+    <div class="ds-title">Model</div>
+    <div class="model-info">
+      <div class="mi-name" id="miName">gemini-2.5-flash</div>
+      <div class="mi-limits">
+        Free tier: ~10 RPM · 1M TPM · 1500 RPD<br/>
+        Rate limiter: 7 s between Gemini calls
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ─── TOKEN DETAIL POPOVER ─────────────────────────────────────────── -->
+<div class="token-popover" id="tokenPopover" style="display:none">
+  <div class="tp-title">Token Usage</div>
+  <div class="tp-row"><span>Input</span><span id="tpInput">0</span></div>
+  <div class="tp-row"><span>Output</span><span id="tpOutput">0</span></div>
+  <div class="tp-row tp-bold"><span>Total</span><span id="tpTotal">0</span></div>
+  <div class="tp-row"><span>API calls</span><span id="tpCalls">0</span></div>
+  <div class="tp-sep"></div>
+  <div class="tp-row"><span>Sessions</span><span id="tpSessions">0</span></div>
+  <div class="tp-row"><span>Last used</span><span id="tpLast">—</span></div>
+</div>
+
+<!-- ─── NAV TABS ────────────────────────────────────────────────────── -->
+<nav class="tab-nav">
+  <button class="tab-btn active" data-tab="companies"><span class="tab-icon">▦</span> Companies</button>
+  <button class="tab-btn" data-tab="algorithm"><span class="tab-icon">◎</span> Algorithm</button>
+  <button class="tab-btn" data-tab="research"><span class="tab-icon">⚗</span> Research</button>
+  <button class="tab-btn" data-tab="reports"><span class="tab-icon">📄</span> Reports</button>
+</nav>
+
+<!-- ─── MAIN ─────────────────────────────────────────────────────────── -->
+<main class="app-main">
+
+  <!-- COMPANIES TAB -->
+  <section id="tab-companies" class="tab-panel active">
+    <div class="panel-header">
+      <h2>Ranked Companies</h2>
+      <div class="panel-controls">
+        <label>Show:</label>
+        <select id="topNSelect">
+          <option value="">All</option>
+          <option value="20" selected>Top 20</option>
+          <option value="50">Top 50</option>
+          <option value="100">Top 100</option>
+        </select>
+        <button class="btn btn-ghost" id="refreshBtn">↻ Refresh</button>
+        <button class="btn btn-ghost" id="toggleViewBtn">⊞ Cards</button>
+      </div>
+    </div>
+    <div id="companiesLoading" class="skeleton-wrapper" style="display:none">
+      <div class="skeleton-row"></div><div class="skeleton-row"></div>
+      <div class="skeleton-row"></div><div class="skeleton-row"></div>
+      <div class="skeleton-row"></div>
+    </div>
+    <div id="companiesContainer"></div>
+  </section>
+
+  <!-- ALGORITHM TAB -->
+  <section id="tab-algorithm" class="tab-panel">
+    <div class="panel-header"><h2>Scoring Algorithm</h2></div>
+    <div id="algorithmContent" class="algo-content"><div class="loading-text">Loading…</div></div>
+  </section>
+
+  <!-- RESEARCH TAB -->
+  <section id="tab-research" class="tab-panel">
+    <div class="panel-header"><h2>AI Research Analysis</h2></div>
+
+    <!-- API Key setup banner — hidden when key is active -->
+    <div id="apiKeyBanner" class="api-key-banner" style="display:none">
+      <div class="akb-left">
+        <span class="akb-icon">⚿</span>
+        <div>
+          <div class="akb-title">Gemini API Key Required</div>
+          <div class="akb-sub">Paste your Google AI Studio key below to activate AI research.</div>
+        </div>
+      </div>
+      <div class="akb-form">
+        <input type="password" id="bannerKeyInput" placeholder="AIza…" autocomplete="off" spellcheck="false" />
+        <button class="btn btn-primary" id="bannerSaveBtn">Activate</button>
+      </div>
+      <div class="akb-feedback" id="bannerFeedback" style="display:none"></div>
+    </div>
+
+    <div class="research-form card">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Select Company</label>
+          <select id="companySelect">
+            <option value="">— choose from ranked list —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Or type name</label>
+          <input type="text" id="companyInput" placeholder="e.g. Tata Consultancy" />
+        </div>
+      </div>
+      <div class="form-footer">
+        <div class="ai-note">
+          <span class="ai-dot"></span>
+          Gemini 2.5 Flash + DuckDuckGo web research
+        </div>
+        <button class="btn btn-primary btn-launch" id="startBtn">▶ Start Research</button>
+      </div>
+    </div>
+
+    <!-- Progress -->
+    <div id="progressPanel" class="progress-panel card" style="display:none">
+      <div class="progress-header">
+        <h3 id="progressCompany">—</h3>
+        <div class="job-id" id="jobId"></div>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="tl-step" data-step="company_selected">
+          <div class="tl-dot"></div>
+          <div class="tl-body"><div class="tl-title">Company Selected</div><div class="tl-msg">Validating company data</div></div>
+        </div>
+        <div class="tl-step" data-step="research_agent">
+          <div class="tl-dot"></div>
+          <div class="tl-body"><div class="tl-title">Web Research</div><div class="tl-msg">Gathering evidence from the web</div></div>
+        </div>
+        <div class="tl-step" data-step="report_generation">
+          <div class="tl-dot"></div>
+          <div class="tl-body"><div class="tl-title">Report Generation</div><div class="tl-msg">Gemini writing analyst report</div></div>
+        </div>
+        <div class="tl-step" data-step="validation">
+          <div class="tl-dot"></div>
+          <div class="tl-body"><div class="tl-title">Validation</div><div class="tl-msg">Validating buy/avoid decision</div></div>
+        </div>
+        <div class="tl-step" data-step="completed">
+          <div class="tl-dot"></div>
+          <div class="tl-body"><div class="tl-title">Complete</div><div class="tl-msg">Research finished</div></div>
+        </div>
+      </div>
+      <div class="live-log" id="liveLog"></div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+        <span class="progress-pct" id="progressPct">0%</span>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div id="resultsPanel" style="display:none">
+      <!-- TLDR card (gap 4) -->
+      <div class="tldr-card" id="tldrCard" style="display:none">
+        <div class="tldr-label">Executive Summary</div>
+        <div class="tldr-text" id="tldrText"></div>
+      </div>
+
+      <div class="verdict-card" id="verdictCard">
+        <div class="verdict-rec" id="verdictRec">—</div>
+        <div class="verdict-meta">
+          <div class="verdict-item"><span class="vl">Confidence</span><span class="vv" id="verdictConf">—</span></div>
+          <div class="verdict-item"><span class="vl">Expected 3Y Return</span><span class="vv" id="verdictReturn">—</span></div>
+          <div class="verdict-item"><span class="vl">Prob. 40%+ Return</span><span class="vv" id="verdictProb">—</span></div>
+          <div class="verdict-item"><span class="vl">Tokens Used</span><span class="vv" id="verdictTokens">—</span></div>
+        </div>
+        <div class="verdict-actions">
+          <button class="btn btn-primary" id="viewReportBtn">📖 View Report</button>
+          <button class="btn btn-ghost" id="downloadReportBtn">⬇ Download</button>
+        </div>
+      </div>
+      <div id="reportViewer" class="report-viewer card" style="display:none">
+        <div class="report-toolbar">
+          <span id="reportTitle">Report</span>
+          <button class="btn btn-ghost btn-sm" id="closeReportBtn">✕ Close</button>
+        </div>
+        <div class="report-body markdown-body" id="reportBody"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- REPORTS TAB -->
+  <section id="tab-reports" class="tab-panel">
+    <div class="panel-header">
+      <h2>Generated Reports</h2>
+      <button class="btn btn-ghost" id="refreshReportsBtn">↻ Refresh</button>
+    </div>
+    <div id="reportsContainer"><div class="loading-text">Loading reports…</div></div>
+  </section>
+
+</main>
+
+<!-- ─── REPORT MODAL ────────────────────────────────────────────────── -->
+<div id="reportModal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="modalTitle">Analyst Report</span>
+      <button class="btn btn-ghost btn-sm" id="modalClose">✕</button>
+    </div>
+    <div class="modal-body markdown-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script src="/static/script.js"></script>
 </body>
 </html>
-

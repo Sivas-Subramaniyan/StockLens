@@ -56,10 +56,13 @@ Thumbs.db
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
-# Project specific
+# Project specific — data & generated outputs
 *.xlsx
 *.xls
-# Keep CSV for now as it's needed
-# ranked_companies.csv
+research_jobs_store.json
+
+# Claude Code internal
+.claude/
 

@@ -1,19 +1,18 @@
 """
 Summarization and Validation Agent
-Uses OpenAI GPT-4o-mini to preprocess research outputs, extract core facts, and validate buy/avoid decision.
+Uses Google Gemini 2.5 Flash (free tier) to generate analyst reports and validate buy/avoid decisions.
+Optimised for free tier: 10 RPM. Tracks token usage per session.
 """
 
 import json
-import os
 import sys
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
-from openai import OpenAI
+from typing import Dict, Optional
 from datetime import datetime
 
-# Fix Windows encoding issues
+# Fix Windows encoding
 if sys.platform == 'win32':
-    # Set stdout encoding to UTF-8 on Windows
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     if hasattr(sys.stderr, 'reconfigure'):
@@ -22,564 +21,418 @@ if sys.platform == 'win32':
 
 class SummarizationAgent:
     """
-    Agent that preprocesses research outputs, extracts core facts, and validates buy/avoid decision
-    based on 40% return in 3 years minimum threshold.
+    Generates comprehensive analyst reports and validates buy/avoid decisions
+    using Google Gemini (free tier, new google-genai SDK).
+    Tracks token usage per session.
     """
-    
-    def __init__(self, openai_api_key: str, model: str = "gpt-4o-mini"):
-        """
-        Initialize summarization agent.
-        
-        Args:
-            openai_api_key: OpenAI API key
-            model: OpenAI model to use (default: gpt-4o-mini)
-        """
-        self.client = OpenAI(api_key=openai_api_key)
+
+    DEFAULT_MODEL = "models/gemini-2.5-flash"
+
+    # Fallback model order if primary is unavailable
+    FALLBACK_MODELS = [
+        "models/gemini-2.5-flash",
+        "models/gemini-2.0-flash",
+        "models/gemini-2.0-flash-lite",
+        "models/gemini-flash-latest",
+    ]
+
+    def __init__(self, gemini_api_key: str, model: str = DEFAULT_MODEL):
+        from google import genai
+        self._client = genai.Client(api_key=gemini_api_key)
         self.model = model
-    
-    def load_research_outputs(self, research_output_dir: str, company_name: str) -> Dict:
-        """
-        Load all research output JSON files for a company.
-        
-        Args:
-            research_output_dir: Directory containing research outputs
-            company_name: Company name to load research for
-            
-        Returns:
-            Dictionary with all research categories
-        """
-        research_dir = Path(research_output_dir)
-        company_safe = "".join(c for c in company_name if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
-        
-        research_data = {}
-        
-        # Load all category files
-        for category_file in research_dir.glob(f"*_{company_safe}_*.json"):
-            if category_file.name.startswith("summary_"):
-                continue
-            
-            try:
-                with open(category_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    category = data.get('category', 'unknown')
-                    research_data[category] = data
-            except Exception as e:
-                print(f"Error loading {category_file}: {e}")
-        
-        return research_data
-    
-    def extract_category_essence(self, company_name: str, category_name: str, category_data: Dict) -> Dict:
-        """
-        Extract core facts and essence from a single research category using reasoning.
-        
-        Args:
-            company_name: Company name
-            category_name: Name of the category
-            category_data: Full category data with evidence
-            
-        Returns:
-            Dictionary with extracted core facts
-        """
-        print(f"  Processing category: {category_name}")
-        
-        # Prepare evidence for this category
-        evidence_text = ""
-        subtopics = category_data.get('subtopics', {})
-        
-        for subtopic, subtopic_data in subtopics.items():
-            evidence_items = subtopic_data.get('evidence', [])
-            evidence_text += f"\n\nSubtopic: {subtopic}\n"
-            evidence_text += f"Query: {subtopic_data.get('query', '')}\n"
-            evidence_text += f"Results: {subtopic_data.get('results_count', 0)}\n"
-            evidence_text += "Evidence:\n"
-            
-            for i, item in enumerate(evidence_items[:10], 1):  # Limit to top 10 per subtopic
-                evidence_text += f"\n{i}. Title: {item.get('title', 'N/A')}\n"
-                evidence_text += f"   Source: {item.get('source_domain', 'N/A')}\n"
-                evidence_text += f"   Confidence: {item.get('confidence', 'N/A')}\n"
-                evidence_text += f"   Excerpt: {item.get('excerpt', 'N/A')}\n"
-                if item.get('raw_content'):
-                    # Include first 500 chars of raw content for context
-                    evidence_text += f"   Content: {item.get('raw_content', '')[:500]}...\n"
-        
-        # Create reasoning prompt for essence extraction
-        prompt = f"""You are a research analyst tasked with extracting CORE FACTS and ESSENCE from research evidence about {company_name}.
+        self._last_call_time = 0.0
 
-Category: {category_name}
-
-Research Evidence:
-{evidence_text}
-
-INSTRUCTIONS:
-1. Read and understand ALL the evidence provided
-2. Use REASONING to identify the CORE FACTS - what are the most important, verifiable facts?
-3. Extract KEY NUMBERS, DATES, NAMES, and QUOTES that are factual and verifiable
-4. Identify RISKS, RED FLAGS, and CONCERNS (if any)
-5. Identify STRENGTHS and POSITIVE INDICATORS (if any)
-6. Note the CONFIDENCE LEVEL of sources (high/medium/low)
-7. Focus on FACTS, not opinions or speculation
-8. Be CRITICAL - if there are concerns, fraud, legal issues, highlight them prominently
-
-Output your analysis in JSON format:
-{{
-    "category": "{category_name}",
-    "core_facts": [
-        "Fact 1 with source and date",
-        "Fact 2 with source and date",
-        ...
-    ],
-    "key_numbers": {{
-        "metric1": "value with source",
-        "metric2": "value with source",
-        ...
-    }},
-    "risks_and_red_flags": [
-        "Risk/red flag 1 with source",
-        "Risk/red flag 2 with source",
-        ...
-    ],
-    "strengths": [
-        "Strength 1 with source",
-        "Strength 2 with source",
-        ...
-    ],
-    "key_quotes": [
-        "Quote 1 with source",
-        "Quote 2 with source",
-        ...
-    ],
-    "source_quality": {{
-        "high_confidence_sources": ["source1", "source2", ...],
-        "medium_confidence_sources": ["source1", "source2", ...],
-        "low_confidence_sources": ["source1", "source2", ...]
-    }},
-    "summary": "200 word summary of the most important findings from this category"
-}}
-
-Be THOROUGH but CONCISE. Extract only the most important facts. If no evidence found, indicate that clearly."""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a research analyst expert at extracting core facts from evidence. You use reasoning to identify the most important, verifiable information. You are critical and focus on facts, not opinions."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                response_format={"type": "json_object"},
-                max_tokens=16384  # GPT-4o-mini max is 16384
-            )
-            
-            essence = json.loads(response.choices[0].message.content)
-            return essence
-            
-        except Exception as e:
-            print(f"    Error extracting essence for {category_name}: {e}")
-            return {
-                "category": category_name,
-                "core_facts": [],
-                "key_numbers": {},
-                "risks_and_red_flags": [],
-                "strengths": [],
-                "key_quotes": [],
-                "source_quality": {},
-                "summary": f"Error processing category: {str(e)}"
-            }
-    
-    def preprocess_research_data(self, company_name: str, research_data: Dict, progress_callback: Optional[callable] = None) -> Dict:
-        """
-        Preprocess all research categories to extract core facts and essence.
-        
-        Args:
-            company_name: Company name
-            research_data: Full research data dictionary
-            
-        Returns:
-            Dictionary with condensed core facts from all categories
-        """
-        print(f"\n{'='*60}")
-        print(f"Preprocessing Research Data for: {company_name}")
-        print(f"{'='*60}")
-        print(f"Processing {len(research_data)} categories...\n")
-        
-        condensed_data = {
-            "company_name": company_name,
-            "categories_processed": len(research_data),
-            "category_essences": {}
+        # Token usage tracking for this session
+        self._token_stats: Dict = {
+            "input_tokens":  0,
+            "output_tokens": 0,
+            "total_tokens":  0,
+            "api_calls":     0,
+            "model_used":    model,
         }
-        
-        # Process each category
-        total_categories = len(research_data)
-        for cat_idx, (category_name, category_data) in enumerate(research_data.items(), 1):
-            if progress_callback:
-                progress_callback({
-                    "category": category_name,
-                    "category_number": cat_idx,
-                    "total_categories": total_categories,
-                    "message": f"Extracting core facts from category {cat_idx}/{total_categories}: {category_name.replace('_', ' ').title()}"
-                })
-            
+
+    @property
+    def token_stats(self) -> Dict:
+        return dict(self._token_stats)
+
+    # ── Rate limiting: free tier safe (10 RPM → 7 s min between calls) ──
+    def _rate_limit(self, min_interval: float = 7.0):
+        elapsed = time.time() - self._last_call_time
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        self._last_call_time = time.time()
+
+    def _record_usage(self, response, model: str):
+        """Extract token counts from Gemini response metadata."""
+        try:
+            um = response.usage_metadata
+            if um:
+                inp = getattr(um, 'prompt_token_count', 0) or 0
+                out = getattr(um, 'candidates_token_count', 0) or 0
+                # 2.5-flash also has thoughts_token_count
+                thoughts = getattr(um, 'thoughts_token_count', 0) or 0
+                total = getattr(um, 'total_token_count', 0) or (inp + out + thoughts)
+
+                self._token_stats["input_tokens"]  += inp
+                self._token_stats["output_tokens"] += out + thoughts
+                self._token_stats["total_tokens"]  += total
+                self._token_stats["api_calls"]     += 1
+                self._token_stats["model_used"]     = model
+        except Exception:
+            # Don't let token tracking break the main flow
+            self._token_stats["api_calls"] += 1
+
+    def _generate(self, prompt: str, system: str, json_mode: bool,
+                  temperature: float, max_tokens: int) -> str:
+        """
+        Core generation call with retry + model fallback.
+        Retries up to 3 times per model, then tries fallback models on 503.
+        """
+        from google.genai import types
+
+        models_to_try = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+
+        for model in models_to_try:
+            config_kwargs = dict(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                system_instruction=system if system else None,
+            )
+            if json_mode:
+                config_kwargs["response_mime_type"] = "application/json"
+            config = types.GenerateContentConfig(**config_kwargs)
+
+            for attempt in range(1, 4):  # up to 3 attempts per model
+                self._rate_limit()
+                try:
+                    response = self._client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=config,
+                    )
+                    if model != self.model:
+                        print(f"  [Gemini] Using fallback model: {model}")
+
+                    # Record token usage BEFORE potentially raising
+                    self._record_usage(response, model)
+
+                    # gemini-2.5-flash uses thinking tokens; response.text may be None
+                    # when token budget is exhausted — extract from parts as fallback
+                    text = response.text
+                    if text is None and response.candidates:
+                        parts = response.candidates[0].content.parts or []
+                        text = "".join(
+                            p.text for p in parts if getattr(p, "text", None)
+                        ) or None
+                    if text is not None:
+                        return text
+                    raise ValueError("Model returned empty response (max_output_tokens may be too low)")
+
+                except Exception as e:
+                    err_str = str(e)
+                    is_503 = "503" in err_str or "UNAVAILABLE" in err_str
+                    is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+
+                    if is_503:
+                        wait = 15 * attempt  # 15 s → 30 s → 45 s
+                        print(f"  [Gemini] 503 on {model} attempt {attempt}/3 — waiting {wait}s…")
+                        time.sleep(wait)
+                    elif is_429:
+                        wait = 20 * attempt
+                        print(f"  [Gemini] 429 rate-limit on {model} — waiting {wait}s…")
+                        time.sleep(wait)
+                    else:
+                        print(f"  [Gemini] Error on {model}: {err_str[:120]}")
+                        break  # non-retriable — try next model
+
+            print(f"  [Gemini] All attempts failed for {model}, trying next…")
+
+        raise RuntimeError("All Gemini models exhausted. Please retry in a few minutes.")
+
+    def _call_text(self, prompt: str, system: str = "", temperature: float = 0.2,
+                   max_tokens: int = 8192) -> str:
+        return self._generate(prompt, system, json_mode=False,
+                               temperature=temperature, max_tokens=max_tokens)
+
+    def _call_json(self, prompt: str, system: str = "", temperature: float = 0.1,
+                   max_tokens: int = 4096) -> dict:
+        raw = self._generate(prompt, system, json_mode=True,
+                              temperature=temperature, max_tokens=max_tokens)
+        return json.loads(raw)
+
+    # ── Load research outputs ────────────────────────────────────────────
+    def load_research_outputs(self, research_output_dir: str, company_name: str) -> Dict:
+        research_dir = Path(research_output_dir)
+        safe = "".join(
+            c for c in company_name if c.isalnum() or c in (' ', '-', '_')
+        ).strip().replace(' ', '_')
+
+        research_data = {}
+        for f in research_dir.glob(f"*_{safe}_*.json"):
+            if f.name.startswith("summary_"):
+                continue
             try:
-                essence = self.extract_category_essence(company_name, category_name, category_data)
-                condensed_data["category_essences"][category_name] = essence
-                print(f"  [OK] Extracted essence from {category_name}")
+                with open(f, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                    research_data[data.get('category', f.stem)] = data
             except Exception as e:
-                print(f"  [ERROR] Error extracting essence from {category_name}: {e}")
-                if progress_callback:
-                    progress_callback({
-                        "category": category_name,
-                        "error": str(e),
-                        "message": f"Error processing {category_name}: {str(e)}"
-                    })
-                condensed_data["category_essences"][category_name] = {
-                    "category": category_name,
-                    "core_facts": [],
-                    "key_numbers": {},
-                    "risks_and_red_flags": [],
-                    "strengths": [],
-                    "key_quotes": [],
-                    "source_quality": {},
-                    "summary": f"Error processing: {str(e)}"
-                }
-        
-        print(f"\n[OK] Preprocessing complete. Extracted core facts from {len(research_data)} categories.")
-        
-        return condensed_data
-    
-    def create_analyst_report(self, company_name: str, financial_data: Dict, research_data: Dict) -> str:
+                print(f"Error loading {f}: {e}")
+        return research_data
+
+    # ── Build research text ──────────────────────────────────────────────
+    def _research_to_text(self, research_data: Dict, max_chars: int = 60_000,
+                          max_items: int = 5, excerpt_chars: int = 150,
+                          full_content_chars: int = 250) -> str:
         """
-        Create comprehensive analyst report using full research data.
-        
-        Args:
-            company_name: Company name
-            financial_data: Financial data dictionary
-            research_data: Full research data dictionary
-            
-        Returns:
-            Markdown formatted analyst report
+        Convert research JSON into a compact text block for Gemini.
+
+        Defaults (tuned for free-tier token budget):
+          max_chars=60_000   — hard cap on total output size
+          max_items=5        — top evidence items per subtopic (was 6)
+          excerpt_chars=150  — DuckDuckGo snippet length  (was 200)
+          full_content_chars=250 — fetched page content length (was 400)
         """
-        # Prepare research summary for prompt
-        research_summary = self._prepare_research_summary(research_data)
-        
-        # Prepare financial data summary
-        financial_summary = self._prepare_financial_summary(financial_data)
-        
-        # Create prompt
-        prompt = f"""You are a STRICT and CRITICAL equity research analyst. Your task is to create a comprehensive analyst report with EXTREME SCRUTINY. You must be CONSERVATIVE and focus heavily on RISKS, FRAUD, MALPRACTICES, and PAST TRACK RECORDS. Default to AVOID unless there is STRONG EVIDENCE for BUY.
+        parts = []
+        for cat_name, cat_data in research_data.items():
+            parts.append(f"\n{'='*60}")
+            parts.append(cat_name.replace('_', ' ').upper())
+            parts.append('='*60)
+            for subtopic, sub_data in cat_data.get('subtopics', {}).items():
+                q_source = sub_data.get('query_source', 'default')
+                pages    = sub_data.get('pages_fetched', 0)
+                parts.append(f"\nSubtopic: {subtopic}  [query:{q_source}  pages:{pages}]")
+                for i, item in enumerate(sub_data.get('evidence', [])[:max_items], 1):
+                    parts.append(f"\n  {i}. {item.get('title', 'N/A')}")
+                    parts.append(f"     Source: {item.get('source_domain', '')}")
+                    excerpt = item.get('excerpt', '')[:excerpt_chars]
+                    if excerpt:
+                        parts.append(f"     Snippet: {excerpt}")
+                    # Only include fetched page content when it adds meaningful text
+                    full = item.get('full_content', '').strip()
+                    if len(full) > 80:
+                        parts.append(f"     Content: {full[:full_content_chars]}")
+        text = "\n".join(parts)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n… [truncated for token budget]"
+        return text
 
-Company: {company_name}
+    def _financial_to_text(self, financial_data: Dict) -> str:
+        return "\n".join(
+            f"- {k.replace('_', ' ').title()}: {v}"
+            for k, v in financial_data.items()
+            if v and str(v) not in ('nan', '')
+        )
 
-Financial Data:
-{financial_summary}
+    # ── Create analyst report (1 Gemini call) ───────────────────────────
+    def create_analyst_report(self, company_name: str, financial_data: Dict,
+                               research_data: Dict) -> str:
+        research_text  = self._research_to_text(research_data)
+        financial_text = self._financial_to_text(financial_data)
 
-Research Evidence (by Category):
-{research_summary}
+        system = (
+            "You are a STRICT and CRITICAL equity research analyst specialising in Indian smallcap stocks. "
+            "Default to AVOID unless there is OVERWHELMING evidence for BUY. "
+            "Prioritise risk management, fraud detection, and governance over potential upside."
+        )
 
-CRITICAL INSTRUCTIONS - READ CAREFULLY:
-1. Start with **BUY** or **AVOID** recommendation in bold at the top
-2. Be EXTREMELY STRINGENT - default to AVOID unless overwhelming evidence supports BUY
-3. PRIORITIZE RISK ANALYSIS:
-   - Scrutinize ALL fraud cases, scams, investigations, regulatory actions
-   - Examine ALL pending legal cases, lawsuits, litigation history
-   - Check for SEBI violations, penalties, enforcement actions
-   - Look for corporate governance issues, management malpractices
-   - Identify accounting irregularities, restatements, auditor qualifications
-   - Check for insider trading violations, market manipulation
-   - Review regulatory warnings, notices from stock exchanges
-   - Analyze past track record failures, business failures
-   - Check credit rating downgrades, debt defaults
-   - Look for whistleblower complaints, corporate scandals
+        prompt = f"""Create a comprehensive analyst report for **{company_name}**.
 
-4. FINANCIAL RED FLAGS - CHECK THOROUGHLY:
-   - Declining promoter holdings (check if promoter_hold < 50% is a concern)
-   - FII/DII exits (negative changes in FII/DII holdings are red flags)
-   - Related party transactions, questionable deals
-   - Auditor changes, frequent CFO changes
-   - Working capital issues, cash flow problems
-   - Debt restructuring, loan defaults
-   - Pledged shares, promoter share pledging
+## Financial Data
+{financial_text}
 
-5. PAST TRACK RECORD - BE CRITICAL:
-   - Analyze historical performance over 5-10 years
-   - Look for consistent patterns of poor performance
-   - Check for volatility in financial metrics
-   - Examine management's track record of capital allocation
+## Research Evidence (from web search)
+{research_text}
 
-6. For each category, use the core facts provided to build your analysis
-7. Extract and present factual data, numbers, and quotes with proper citations
-8. Identify weaknesses FIRST, then strengths
-9. Assess competitive position, financial health, management quality with SKEPTICISM
-10. Determine if company can achieve 40%+ return over 3 years - be CONSERVATIVE
-11. Provide detailed risk factors - be COMPREHENSIVE
-12. Determine growth opportunities but also identify what could go wrong
-
-OUTPUT FORMAT:
-- Start with **BUY** or **AVOID** in bold
-- Use markdown formatting
-- Include sections for each research category
-- PRIORITIZE sections on risks, fraud, malpractices, red flags
-- Provide clear reasoning - if BUY, explain why risks are manageable
-- Include confidence level in the recommendation
-- Cite sources where applicable
-
-REMEMBER: 
-- Be CONSERVATIVE - it's better to AVOID a good stock than BUY a bad one
-- Default to AVOID unless there is STRONG, COMPELLING evidence for BUY
-- Focus on what could go WRONG, not just what could go right
-- Past track record and management integrity are CRITICAL factors"""
+## Instructions
+1. Open with a bold **BUY** or **AVOID** recommendation.
+2. Default to AVOID unless evidence strongly supports BUY.
+3. Prioritise risk analysis first: fraud, SEBI actions, governance, accounting issues, promoter pledging.
+4. Cover each research category systematically.
+5. Assess 40%+ return probability in 3 years — be conservative.
+6. Use markdown with clear headings. Cite source domains where possible.
+7. Weaknesses and risks FIRST, then strengths."""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a STRICT and CRITICAL equity research analyst with expertise in fundamental analysis and valuation. You are EXTREMELY CONSERVATIVE and default to AVOID unless there is OVERWHELMING evidence for BUY. You prioritize risk management, fraud detection, and past track record analysis over potential returns. You provide evidence-based investment recommendations with extreme scrutiny."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                max_tokens=16384  # GPT-4o-mini max is 16384
-            )
-            
-            report = response.choices[0].message.content
-            return report
-            
+            return self._call_text(prompt, system=system, temperature=0.2, max_tokens=8192)
         except Exception as e:
-            return f"Error generating report: {str(e)}"
-    
-    def validate_buy_avoid(self, company_name: str, financial_data: Dict, research_data: Dict, report: str) -> Dict:
-        """
-        Validate buy/avoid decision based on 40% return threshold using full research data.
-        
-        Args:
-            company_name: Company name
-            financial_data: Financial data
-            research_data: Full research data
-            report: Generated analyst report
-            
-        Returns:
-            Dictionary with validation results
-        """
-        # Extract key financial metrics
-        current_price = financial_data.get('CMP Rs.', financial_data.get('current_price', ''))
-        pe_ratio = financial_data.get('pe_ratio', '')
-        roce = financial_data.get('roce', '')
-        market_cap = financial_data.get('market_cap', '')
-        
-        # Extract financial metrics for validation
-        promoter_hold = financial_data.get('prom_hold', '')
-        chg_fii = financial_data.get('chg_fii', '')
-        chg_dii = financial_data.get('chg_dii', '')
-        debt_eq = financial_data.get('debt_eq', '')
-        fcf_3y = financial_data.get('fcf_3y', '')
-        wc_days = financial_data.get('wc_days', '')
-        cash_cycle = financial_data.get('cash_cycle', '')
-        industry_pe = financial_data.get('ind_pe', '')
-        
-        # Prepare research summary for validation (truncate if too long)
-        research_summary = self._prepare_research_summary(research_data)
-        if len(research_summary) > 50000:  # Limit to ~50k chars
-            research_summary = research_summary[:50000] + "\n... (truncated for length)"
-        
-        # Truncate report if too long
-        report_truncated = report[:20000] + "... (truncated)" if len(report) > 20000 else report
-        
-        validation_prompt = f"""You are a STRICT and CRITICAL equity research expert. Your job is to carefully evaluate companies for BUY or AVOID decisions with EXTREME SCRUTINY. You must be CONSERVATIVE and focus heavily on RISKS, FRAUD, MALPRACTICES, and PAST TRACK RECORDS. Default to AVOID unless there is OVERWHELMING evidence for BUY.
+            return f"Error generating report: {e}"
 
-Company: {company_name}
+    # ── Validate buy/avoid (1 Gemini call, JSON) ────────────────────────
+    def validate_buy_avoid(self, company_name: str, financial_data: Dict,
+                            research_data: Dict, report: str) -> Dict:
+        research_text  = self._research_to_text(research_data, max_chars=20_000,
+                                                max_items=3, excerpt_chars=100,
+                                                full_content_chars=150)
+        report_snippet = report[:6000] + "…[truncated]" if len(report) > 6000 else report
+        fd = financial_data
 
-Financial Metrics:
-- Market Cap: {market_cap} Cr
-- P/E Ratio: {pe_ratio}
-- ROCE: {roce}%
-- Current Price: {current_price}
-- Promoter Holding: {promoter_hold}%
-- Change in FII Holding: {chg_fii}%
-- Change in DII Holding: {chg_dii}%
-- Debt/Equity: {debt_eq}
-- Free Cash Flow (3Y): {fcf_3y} Cr
-- Working Capital Days: {wc_days}
-- Cash Cycle: {cash_cycle}
-- Industry P/E: {industry_pe}
+        system = (
+            "You are a STRICT quantitative analyst for Indian equities. "
+            "Default to AVOID when uncertain. Prioritise risk over upside."
+        )
 
-Research Evidence:
-{research_summary[:30000]}
+        prompt = f"""Evaluate **{company_name}** for a BUY / AVOID decision.
 
-Analyst Report:
-{report_truncated}
+## Key Financials
+- Market Cap: {fd.get('market_cap', 'N/A')} Cr  |  P/E: {fd.get('pe_ratio', 'N/A')}
+- ROCE: {fd.get('roce', 'N/A')}%  |  CMP: {fd.get('CMP Rs.', 'N/A')}
+- Promoter Holding: {fd.get('prom_hold', 'N/A')}%
+- FII Change: {fd.get('chg_fii', 'N/A')}%  |  DII Change: {fd.get('chg_dii', 'N/A')}%
+- Debt/Equity: {fd.get('debt_eq', 'N/A')}  |  FCF 3Y: {fd.get('fcf_3y', 'N/A')} Cr
+- Working Capital Days: {fd.get('wc_days', 'N/A')}  |  Cash Cycle: {fd.get('cash_cycle', 'N/A')}
+- Industry P/E: {fd.get('ind_pe', 'N/A')}  |  Investment Score: {fd.get('investment_score', 'N/A')}
 
-CRITICAL ANALYSIS GUIDELINES:
+## Research Summary
+{research_text}
 
-1. Financials first: Review hard numbers – profitability, growth, leverage, cash flows, capital efficiency. RED FLAGS: Declining promoter holdings (<50%), FII/DII exits, high debt, negative cash flow, poor working capital management.
+## Analyst Report
+{report_snippet}
 
-2. Risk and fraud analysis: PRIORITIZE - Scrutinize ALL fraud cases, investigations, regulatory actions, lawsuits, SEBI violations, governance issues, accounting irregularities, insider trading, market manipulation.
+## Rules
+- BUY: strong financials, no material red flags, clear moat, 40%+ return highly probable.
+- AVOID: any material risk, fraud, weak financials, uncertain upside. When in doubt → AVOID.
 
-3. Past track record: Analyze 5-10 year history. Look for consistent poor performance, volatility, management failures, capital allocation mistakes.
-
-4. Moat and growth drivers: Only BUY if there's STRONG evidence of sustainable competitive advantage AND clear growth pathway to 40%+ return in 3 years.
-
-5. Upside potential: Estimate if at least 40% upside in 3 years is plausible. Be CONSERVATIVE. Default to AVOID if uncertain.
-
-6. Final call: 
-   - BUY ONLY if: financials are strong, no major red flags, clear moat, manageable risks, and 40%+ return is highly probable.
-   - AVOID if: any material risks, fraud concerns, weak financials, no clear moat, or uncertain upside.
-   - When in doubt, ALWAYS choose AVOID.
-
-7. Extract specific red flags and financial concerns from the research evidence and analyst report.
-
-Please provide your evaluation in the following JSON structure (use empty arrays if none found):
+Return JSON with exactly these keys:
 {{
-    "recommendation": "BUY" or "AVOID",
-    "confidence": "high" or "medium" or "low",
-    "expected_return_3y": "percentage estimate (e.g., '45%' or 'N/A')",
-    "probability_40pct_return": "high/medium/low",
-    "key_drivers": ["driver1", "driver2", ...],
-    "key_risks": ["risk1", "risk2", ...],
-    "red_flags_found": ["flag1", "flag2", ...],
-    "financial_concerns": ["concern1", "concern2", ...],
-    "reasoning": "detailed explanation: summarize your reasoning—use both numbers and qualitative arguments"
+  "recommendation": "BUY" or "AVOID",
+  "confidence": "high" or "medium" or "low",
+  "expected_return_3y": "e.g. 45% or N/A",
+  "probability_40pct_return": "high or medium or low",
+  "key_drivers": ["driver1"],
+  "key_risks": ["risk1"],
+  "red_flags_found": ["flag1"],
+  "financial_concerns": ["concern1"],
+  "reasoning": "2-3 sentence explanation"
 }}"""
 
-
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a STRICT quantitative analyst specializing in return projections and risk assessment. You are EXTREMELY CONSERVATIVE and default to AVOID unless there is OVERWHELMING evidence for BUY. You prioritize risk management over potential returns."},
-                    {"role": "user", "content": validation_prompt}
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"},
-                max_tokens=16384  # GPT-4o-mini max is 16384
-            )
-            
-            validation_result = json.loads(response.choices[0].message.content)
-            return validation_result
-            
+            return self._call_json(prompt, system=system, temperature=0.1, max_tokens=2048)
         except Exception as e:
-            return {
-                "recommendation": "ERROR",
-                "error": str(e),
-                "reasoning": "Failed to generate validation"
-            }
-    
-    def _prepare_research_summary(self, research_data: Dict) -> str:
-        """Prepare research summary from full research data."""
-        summary_parts = []
-        
-        for category_name, category_data in research_data.items():
-            category_display = category_name.replace('_', ' ').title()
-            summary_parts.append(f"\n{'='*60}")
-            summary_parts.append(f"{category_display}")
-            summary_parts.append(f"{'='*60}")
-            
-            subtopics = category_data.get('subtopics', {})
-            for subtopic, subtopic_data in subtopics.items():
-                summary_parts.append(f"\nSubtopic: {subtopic}")
-                summary_parts.append(f"Query: {subtopic_data.get('query', 'N/A')}")
-                summary_parts.append(f"Results Found: {subtopic_data.get('results_count', 0)}")
-                
-                evidence_items = subtopic_data.get('evidence', [])
-                if evidence_items:
-                    summary_parts.append(f"\nEvidence ({len(evidence_items)} items):")
-                    for i, item in enumerate(evidence_items[:10], 1):  # Limit to top 10 per subtopic
-                        summary_parts.append(f"\n  {i}. {item.get('title', 'N/A')}")
-                        summary_parts.append(f"     Source: {item.get('source_domain', 'N/A')}")
-                        summary_parts.append(f"     URL: {item.get('url', 'N/A')}")
-                        summary_parts.append(f"     Date: {item.get('retrieval_date', 'N/A')}")
-                        summary_parts.append(f"     Confidence: {item.get('confidence', 'N/A')}")
-                        excerpt = item.get('excerpt', 'N/A')
-                        if excerpt and len(excerpt) > 200:
-                            excerpt = excerpt[:200] + "..."
-                        summary_parts.append(f"     Excerpt: {excerpt}")
-        
-        return "\n".join(summary_parts)
-    
-    def _prepare_financial_summary(self, financial_data: Dict) -> str:
-        """Prepare financial data summary for prompt."""
-        lines = []
-        for key, value in financial_data.items():
-            if value and str(value) != 'nan':
-                lines.append(f"- {key.replace('_', ' ').title()}: {value}")
-        return "\n".join(lines)
-    
+            return {"recommendation": "ERROR", "error": str(e), "reasoning": "Validation failed"}
+
+    # ── TLDR summary — standalone fallback (1 extra Gemini call) ───────────
     def generate_tldr_summary(self, company_name: str, validation: Dict, report: str) -> str:
-        """
-        Generate a TLDR executive summary paragraph based on validation and report.
-        
-        Args:
-            company_name: Company name
-            validation: Validation results dictionary
-            report: Analyst report text
-            
-        Returns:
-            TLDR summary paragraph
-        """
-        recommendation = validation.get('recommendation', 'N/A')
-        confidence = validation.get('confidence', 'N/A')
-        expected_return = validation.get('expected_return_3y', 'N/A')
-        reasoning = validation.get('reasoning', '')
-        
-        # Truncate reasoning if too long
-        reasoning_truncated = reasoning[:500] + "..." if len(reasoning) > 500 else reasoning
-        
-        tldr_prompt = f"""Generate a concise TLDR (Too Long; Didn't Read) executive summary paragraph for an investment recommendation. This should be a single, well-written paragraph (3-5 sentences) that captures the essence of the investment decision.
+        """Kept for backward-compat (e.g. research_orchestrator). Prefer validate_and_summarize."""
+        rec       = validation.get('recommendation', 'N/A')
+        conf      = validation.get('confidence', 'N/A')
+        ret       = validation.get('expected_return_3y', 'N/A')
+        reasoning = validation.get('reasoning', '')[:400]
 
-Company: {company_name}
-Recommendation: {recommendation}
-Confidence: {confidence}
-Expected 3-Year Return: {expected_return}
-Key Reasoning: {reasoning_truncated}
+        prompt = f"""Write a 3-5 sentence professional executive summary paragraph for:
 
-Write a clear, professional executive summary paragraph that:
-1. States the recommendation (BUY/AVOID) upfront
-2. Provides the key rationale in 2-3 sentences
-3. Mentions the expected return and confidence level
-4. Is suitable for busy executives who need a quick overview
+Company: {company_name}  |  Recommendation: {rec}  |  Confidence: {conf}
+Expected 3Y Return: {ret}  |  Key Reasoning: {reasoning}
 
-Output ONLY the paragraph text, no markdown formatting, no headers, just the paragraph itself."""
+Requirements: state recommendation upfront, give key rationale, mention expected return and confidence.
+Output ONLY the paragraph — no headings, no markdown, no extra text."""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at writing concise executive summaries for investment reports. You write clear, professional, and informative summaries."},
-                    {"role": "user", "content": tldr_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=300
-            )
-            
-            tldr = response.choices[0].message.content.strip()
-            return tldr
-            
+            return self._call_text(prompt, temperature=0.3, max_tokens=512).strip()
         except Exception as e:
-            # Fallback to simple summary if generation fails
-            return f"{company_name} receives a {recommendation} recommendation with {confidence} confidence. Expected 3-year return is {expected_return}. {reasoning_truncated[:200]}..."
-    
-    def save_report(self, company_name: str, report: str, validation: Dict, output_dir: str = "reports"):
+            return f"{company_name}: {rec} recommendation ({conf} confidence). Expected 3Y return: {ret}. {reasoning}"
+
+    # ── Combined validate + TLDR (saves 1 Gemini call vs separate calls) ──
+    def validate_and_summarize(self, company_name: str, financial_data: Dict,
+                               research_data: Dict, report: str) -> Dict:
         """
-        Save analyst report and validation to markdown file.
-        
+        Single Gemini call that returns both the buy/avoid validation AND
+        a 3-5 sentence TLDR executive summary.
+
+        Replaces the separate validate_buy_avoid() + generate_tldr_summary() pair,
+        saving one API call per research session on the free tier.
+
+        Returns the same keys as validate_buy_avoid() plus a "tldr" key.
+        Falls back to separate calls if the combined call fails.
+        """
+        research_text  = self._research_to_text(research_data, max_chars=25_000)
+        report_snippet = report[:6000] + "…[truncated]" if len(report) > 6000 else report
+        fd = financial_data
+
+        system = (
+            "You are a STRICT quantitative analyst for Indian equities. "
+            "Default to AVOID when uncertain. Prioritise capital preservation over upside."
+        )
+
+        prompt = f"""Evaluate **{company_name}** for a BUY / AVOID decision AND write a concise executive summary.
+
+## Key Financials
+- Market Cap: {fd.get('market_cap', 'N/A')} Cr  |  P/E: {fd.get('pe_ratio', 'N/A')}
+- ROCE: {fd.get('roce', 'N/A')}%  |  CMP: {fd.get('CMP Rs.', 'N/A')}
+- Promoter Holding: {fd.get('prom_hold', 'N/A')}%
+- FII Change: {fd.get('chg_fii', 'N/A')}%  |  DII Change: {fd.get('chg_dii', 'N/A')}%
+- Debt/Equity: {fd.get('debt_eq', 'N/A')}  |  FCF 3Y: {fd.get('fcf_3y', 'N/A')} Cr
+- Working Capital Days: {fd.get('wc_days', 'N/A')}  |  Cash Cycle: {fd.get('cash_cycle', 'N/A')}
+- Industry P/E: {fd.get('ind_pe', 'N/A')}  |  Investment Score: {fd.get('investment_score', 'N/A')}
+
+## Research Evidence
+{research_text}
+
+## Analyst Report
+{report_snippet}
+
+## Decision Rules
+- BUY only if: strong financials, no material red flags, clear moat, 40%+ return highly probable.
+- AVOID if: any material risk, fraud, governance issues, uncertain upside. When in doubt → AVOID.
+
+Return ONLY valid JSON with exactly these keys:
+{{
+  "recommendation": "BUY" or "AVOID",
+  "confidence": "high" or "medium" or "low",
+  "expected_return_3y": "e.g. 45% or N/A",
+  "probability_40pct_return": "high or medium or low",
+  "key_drivers": ["driver1", "driver2"],
+  "key_risks": ["risk1", "risk2"],
+  "red_flags_found": ["flag1"],
+  "financial_concerns": ["concern1"],
+  "reasoning": "2-3 sentence explanation of the decision",
+  "tldr": "3-5 sentence professional executive summary. State the recommendation upfront, give the key rationale, mention expected return and confidence level."
+}}"""
+
+        try:
+            result = self._call_json(prompt, system=system, temperature=0.1, max_tokens=2560)
+            # Ensure tldr is present; fall back to reasoning if missing
+            if not result.get("tldr"):
+                result["tldr"] = result.get("reasoning", "")
+            return result
+        except Exception as e:
+            print(f"  [Gemini] validate_and_summarize failed ({e}), falling back to separate calls")
+            # Graceful fallback: run the two original calls independently
+            validation = self.validate_buy_avoid(company_name, financial_data, research_data, report)
+            validation["tldr"] = self.generate_tldr_summary(company_name, validation, report)
+            return validation
+
+    # ── Save report ──────────────────────────────────────────────────────
+    def save_report(self, company_name: str, report: str, validation: Dict,
+                    output_dir: str = "reports", tldr: str = None) -> tuple:
+        """
+        Saves the full analyst report to disk.
+
         Args:
-            company_name: Company name
-            report: Analyst report text
-            validation: Validation results dictionary
-            output_dir: Output directory for reports
+            tldr: Pre-generated TLDR string (from validate_and_summarize).
+                  If None, generates it with an extra Gemini call (backward-compat).
+
+        Returns:
+            (filepath: str, tldr: str)
         """
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
-        
-        safe_company_name = "".join(c for c in company_name if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
+
+        safe = "".join(
+            c for c in company_name if c.isalnum() or c in (' ', '-', '_')
+        ).strip().replace(' ', '_')
         date_str = datetime.now().strftime("%Y-%m-%d")
-        
-        filename = f"{safe_company_name}_Analyst_Report_{date_str}.md"
-        filepath = output_path / filename
-        
-        # Generate TLDR summary
-        print("\nGenerating TLDR executive summary...")
-        tldr_summary = self.generate_tldr_summary(company_name, validation, report)
-        
-        # Create markdown content
-        md_content = f"""# Analyst Report: {company_name}
+        filepath = output_path / f"{safe}_Analyst_Report_{date_str}.md"
+
+        if tldr is None:
+            print("\nGenerating TLDR summary (extra call — use validate_and_summarize to avoid this)…")
+            tldr = self.generate_tldr_summary(company_name, validation, report)
+
+        drivers  = "\n".join(f"- {d}" for d in validation.get('key_drivers', []))        or "- None identified"
+        risks    = "\n".join(f"- {r}" for r in validation.get('key_risks', []))           or "- None identified"
+        flags    = "\n".join(f"- ⚠️ {f}" for f in validation.get('red_flags_found', [])) or "- No major red flags"
+        concerns = "\n".join(f"- ⚠️ {c}" for c in validation.get('financial_concerns', [])) or "- None identified"
+
+        content = f"""# Analyst Report: {company_name}
 
 **Date:** {date_str}
 
@@ -587,14 +440,16 @@ Output ONLY the paragraph text, no markdown formatting, no headers, just the par
 
 ## Executive Summary
 
-**Recommendation:** {validation.get('recommendation', 'N/A')}  
-**Confidence:** {validation.get('confidence', 'N/A')}  
-**Expected 3-Year Return:** {validation.get('expected_return_3y', 'N/A')}  
-**Probability of 40%+ Return:** {validation.get('probability_40pct_return', 'N/A')}
+| | |
+|---|---|
+| **Recommendation** | **{validation.get('recommendation', 'N/A')}** |
+| **Confidence** | {validation.get('confidence', 'N/A')} |
+| **Expected 3-Year Return** | {validation.get('expected_return_3y', 'N/A')} |
+| **Probability of 40%+ Return** | {validation.get('probability_40pct_return', 'N/A')} |
 
-### TLDR Summary
+### TLDR
 
-{tldr_summary}
+{tldr}
 
 ---
 
@@ -606,30 +461,28 @@ Output ONLY the paragraph text, no markdown formatting, no headers, just the par
 
 ## Validation & Recommendation
 
-### Recommendation: {validation.get('recommendation', 'N/A')}
+### Key Drivers
+{drivers}
 
-### Key Drivers:
-{chr(10).join(f"- {driver}" for driver in validation.get('key_drivers', [])) if validation.get('key_drivers') else "- None identified"}
+### Key Risks
+{risks}
 
-### Key Risks:
-{chr(10).join(f"- {risk}" for risk in validation.get('key_risks', [])) if validation.get('key_risks') else "- None identified"}
+### Red Flags
+{flags}
 
-### Red Flags Found:
-{chr(10).join(f"- [WARNING] {flag}" for flag in validation.get('red_flags_found', [])) if validation.get('red_flags_found') else "- No major red flags identified"}
+### Financial Concerns
+{concerns}
 
-### Financial Concerns:
-{chr(10).join(f"- [WARNING] {concern}" for concern in validation.get('financial_concerns', [])) if validation.get('financial_concerns') else "- No major financial concerns identified"}
-
-### Reasoning:
+### Reasoning
 {validation.get('reasoning', 'N/A')}
 
 ---
 
-*Report generated by AI Research Agent*
+*Generated by StockLens AI (Gemini {self.model}) — {date_str}*
 """
-        
+
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(md_content)
-        
-        print(f"\n[OK] Report saved to: {filepath}")
-        return str(filepath)
+            f.write(content)
+
+        print(f"Report saved: {filepath}")
+        return str(filepath), tldr

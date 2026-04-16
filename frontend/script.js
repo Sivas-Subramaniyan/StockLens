@@ -1,489 +1,763 @@
-// API Base URL - Automatically use same origin when served from API
-const API_BASE_URL = window.location.origin === 'file://' 
-    ? 'http://localhost:8000'  // Local file (development)
-    : window.location.origin;  // Same origin (when served from FastAPI)
+/* ─────────────────────────────────────────────────────────
+   StockLens — AI Research Terminal  |  Frontend JS
+   ───────────────────────────────────────────────────────── */
 
-let companies = [];
-let currentResearchId = null;
-let statusPollInterval = null;
+const BASE = window.location.origin === 'file://' ? 'http://localhost:8000' : window.location.origin;
 
-// Initialize
+let allCompanies   = [];
+let cardView       = false;
+let currentJobId   = null;
+let pollTimer      = null;
+let currentCompany = null;
+let tokenPollTimer = null;
+let popoverOpen    = false;
+
+// ── Init ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-    loadCompanies();
-    loadAlgorithm();
-    loadCompaniesForSelect();
+  initTheme();
+  initTabs();
+  loadCompanies();
+  loadAlgorithm();
+  loadCompaniesForSelect();
+  loadReports();
+  fetchSettings();
+  fetchTokenStats();
+
+  // Start polling token stats every 15 s
+  tokenPollTimer = setInterval(fetchTokenStats, 15_000);
+
+  // Companies controls
+  document.getElementById('topNSelect').addEventListener('change', loadCompanies);
+  document.getElementById('refreshBtn').addEventListener('click', loadCompanies);
+  document.getElementById('toggleViewBtn').addEventListener('click', toggleView);
+
+  // Research
+  document.getElementById('startBtn').addEventListener('click', startResearch);
+  document.getElementById('viewReportBtn').addEventListener('click', viewReport);
+  document.getElementById('downloadReportBtn').addEventListener('click', downloadReport);
+  document.getElementById('closeReportBtn').addEventListener('click', () => {
+    document.getElementById('reportViewer').style.display = 'none';
+  });
+
+  // Reports tab
+  document.getElementById('refreshReportsBtn').addEventListener('click', loadReports);
+
+  // Modal
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  document.getElementById('reportModal').addEventListener('click', e => {
+    if (e.target === document.getElementById('reportModal')) closeModal();
+  });
+
+  // Theme
+  document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+
+  // Company select sync
+  document.getElementById('companySelect').addEventListener('change', () => {
+    document.getElementById('companyInput').value = document.getElementById('companySelect').value;
+  });
+  document.getElementById('companyInput').addEventListener('input', () => {
+    document.getElementById('companySelect').value = '';
+  });
+
+  // Settings drawer
+  document.getElementById('settingsBtn').addEventListener('click', openDrawer);
+  document.getElementById('keyStatusPill').addEventListener('click', openDrawer);
+  document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+  document.getElementById('drawerOverlay').addEventListener('click', closeDrawer);
+  document.getElementById('saveKeyBtn').addEventListener('click', saveApiKey);
+  document.getElementById('keyToggleVis').addEventListener('click', toggleKeyVisibility);
+  document.getElementById('resetTokensBtn').addEventListener('click', resetTokens);
+
+  // Inline API key banner (Research tab)
+  document.getElementById('bannerSaveBtn').addEventListener('click', saveBannerKey);
+  document.getElementById('bannerKeyInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') saveBannerKey();
+  });
+
+  // Token widget popover
+  document.getElementById('tokenWidget').addEventListener('click', toggleTokenPopover);
+  document.addEventListener('click', e => {
+    const widget = document.getElementById('tokenWidget');
+    const popover = document.getElementById('tokenPopover');
+    if (popoverOpen && !widget.contains(e.target) && !popover.contains(e.target)) {
+      hideTokenPopover();
+    }
+  });
+
+  // Enter key in API key input
+  document.getElementById('keyInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') saveApiKey();
+  });
 });
 
-// Tab Navigation
-function showTab(tabName) {
-    // Hide all tabs
-    document.querySelectorAll('.tab-content').forEach(tab => {
-        tab.classList.remove('active');
-    });
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('active');
-    });
-    
-    // Show selected tab
-    document.getElementById(`${tabName}-tab`).classList.add('active');
-    event.target.classList.add('active');
+// ── Theme ─────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  document.getElementById('themeToggle').textContent = saved === 'dark' ? '☀' : '🌙';
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+  document.getElementById('themeToggle').textContent = next === 'dark' ? '☀' : '🌙';
 }
 
-// Load Companies
+// ── Tabs ──────────────────────────────────────────────────
+function initTabs() {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+    });
+  });
+}
+function switchToTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
+}
+
+// ── Settings — fetch current ──────────────────────────────
+async function fetchSettings() {
+  try {
+    const res  = await fetch(`${BASE}/settings`);
+    const data = await res.json();
+    applySettings(data);
+  } catch { /* server might not be up yet */ }
+}
+
+function applySettings(data) {
+  const dot   = document.getElementById('ksDot');
+  const label = document.getElementById('ksLabel');
+  const kcVal = document.getElementById('kcValue');
+  const kcSt  = document.getElementById('kcStatus');
+  const badge = document.getElementById('badgeModel');
+
+  kcVal.textContent = data.key_label || '—';
+  if (data.model) badge.textContent = data.model.replace('models/', '');
+
+  const isActive = data.key_status === 'active';
+
+  if (isActive) {
+    dot.className     = 'ks-dot active';
+    label.textContent = 'Active';
+    kcSt.textContent  = '✓ Active';
+    kcSt.className    = 'kc-status active';
+  } else if (data.key_status === 'invalid') {
+    dot.className     = 'ks-dot invalid';
+    label.textContent = 'Invalid key';
+    kcSt.textContent  = '✗ Invalid';
+    kcSt.className    = 'kc-status invalid';
+  } else {
+    dot.className     = 'ks-dot checking';
+    label.textContent = data.has_key ? 'Unverified' : 'No key set';
+    kcSt.textContent  = '';
+    kcSt.className    = 'kc-status';
+  }
+
+  // Show / hide the inline API key banner in the Research tab
+  const banner = document.getElementById('apiKeyBanner');
+  if (banner) banner.style.display = isActive ? 'none' : 'flex';
+}
+
+// ── Settings drawer open/close ────────────────────────────
+function openDrawer() {
+  document.getElementById('settingsDrawer').classList.add('open');
+  document.getElementById('drawerOverlay').classList.add('open');
+  fetchSettings();
+  fetchTokenStats();
+}
+function closeDrawer() {
+  document.getElementById('settingsDrawer').classList.remove('open');
+  document.getElementById('drawerOverlay').classList.remove('open');
+}
+
+// ── Key visibility toggle ─────────────────────────────────
+function toggleKeyVisibility() {
+  const input = document.getElementById('keyInput');
+  const btn   = document.getElementById('keyToggleVis');
+  if (input.type === 'password') {
+    input.type    = 'text';
+    btn.textContent = '🙈';
+  } else {
+    input.type    = 'password';
+    btn.textContent = '👁';
+  }
+}
+
+// ── Save / verify API key ─────────────────────────────────
+async function saveApiKey() {
+  const newKey = document.getElementById('keyInput').value.trim();
+  if (!newKey) {
+    showKeyFeedback('Please enter an API key.', 'error');
+    return;
+  }
+
+  const btn     = document.getElementById('saveKeyBtn');
+  const btnText = document.getElementById('saveKeyBtnText');
+  const ri      = document.getElementById('restartIndicator');
+  const riMsg   = document.getElementById('riMsg');
+
+  btn.disabled  = true;
+  btnText.textContent = '⏳ Verifying…';
+  hideKeyFeedback();
+  ri.style.display = 'none';
+
+  try {
+    const res  = await fetch(`${BASE}/settings/api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: newKey }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.detail || 'Verification failed');
+    }
+
+    // Show restart animation
+    ri.style.display = 'flex';
+    riMsg.textContent = 'Reinitialising system…';
+
+    await delay(1200);
+    riMsg.textContent = 'Reloading companies…';
+
+    // Refresh everything with the new key
+    await loadCompanies();
+    await loadCompaniesForSelect();
+    await fetchSettings();
+    fetchTokenStats();
+
+    await delay(600);
+    ri.style.display = 'none';
+    riMsg.textContent = 'System ready.';
+
+    // Clear the input
+    document.getElementById('keyInput').value = '';
+    document.getElementById('keyInput').type  = 'password';
+    document.getElementById('keyToggleVis').textContent = '👁';
+
+    showKeyFeedback(`✓ ${data.message}`, 'success');
+
+    // Update header key status
+    applySettings(data);
+
+  } catch (err) {
+    ri.style.display = 'none';
+    const msg = err.message || 'Unknown error';
+    showKeyFeedback(`✗ ${msg}`, 'error');
+    // Mark key as invalid in header
+    document.getElementById('ksDot').className   = 'ks-dot invalid';
+    document.getElementById('ksLabel').textContent = 'Invalid';
+  } finally {
+    btn.disabled  = false;
+    btnText.textContent = '✓ Verify & Apply';
+  }
+}
+
+function showKeyFeedback(msg, type) {
+  const el = document.getElementById('keyFeedback');
+  el.textContent = msg;
+  el.className   = `key-feedback ${type}`;
+  el.style.display = 'block';
+}
+function hideKeyFeedback() {
+  document.getElementById('keyFeedback').style.display = 'none';
+}
+
+// ── Token counter ─────────────────────────────────────────
+async function fetchTokenStats() {
+  try {
+    const res  = await fetch(`${BASE}/stats/tokens`);
+    const data = await res.json();
+    renderTokenStats(data);
+    // Also sync key status
+    applySettings({ key_label: data.key_label, key_status: data.key_status });
+  } catch { /* silent */ }
+}
+
+function renderTokenStats(data) {
+  const total    = data.total_tokens    || 0;
+  const input    = data.input_tokens    || 0;
+  const output   = data.output_tokens   || 0;
+  const calls    = data.api_calls       || 0;
+  const sessions = data.sessions        || 0;
+  const lastUpd  = data.last_updated;
+
+  const fmt = n => n.toLocaleString();
+
+  // Header widget
+  const countEl = document.getElementById('twCount');
+  if (parseInt(countEl.textContent.replace(/,/g,'')) !== total) {
+    countEl.textContent = fmt(total);
+    countEl.classList.add('updated');
+    setTimeout(() => countEl.classList.remove('updated'), 1500);
+  }
+
+  // Popover
+  document.getElementById('tpInput').textContent    = fmt(input);
+  document.getElementById('tpOutput').textContent   = fmt(output);
+  document.getElementById('tpTotal').textContent    = fmt(total);
+  document.getElementById('tpCalls').textContent    = calls;
+  document.getElementById('tpSessions').textContent = sessions;
+  document.getElementById('tpLast').textContent     = lastUpd
+    ? new Date(lastUpd).toLocaleTimeString() : '—';
+
+  // Drawer breakdown
+  document.getElementById('tbInput').textContent    = fmt(input);
+  document.getElementById('tbOutput').textContent   = fmt(output);
+  document.getElementById('tbTotal').textContent    = fmt(total);
+  document.getElementById('tbCalls').textContent    = calls;
+  document.getElementById('tbSessions').textContent = sessions;
+  document.getElementById('tokenBarUsed').textContent = fmt(total);
+
+  // Token bar (soft limit ~250K/day)
+  const SOFT_LIMIT = 250_000;
+  const pct   = Math.min((total / SOFT_LIMIT) * 100, 100).toFixed(1);
+  const fill  = document.getElementById('tokenBarFill');
+  fill.style.width = `${pct}%`;
+  fill.className   = `token-bar-fill${pct > 80 ? ' warn' : ''}`;
+}
+
+function toggleTokenPopover() {
+  popoverOpen ? hideTokenPopover() : showTokenPopover();
+}
+function showTokenPopover() {
+  document.getElementById('tokenPopover').style.display = 'block';
+  popoverOpen = true;
+}
+function hideTokenPopover() {
+  document.getElementById('tokenPopover').style.display = 'none';
+  popoverOpen = false;
+}
+
+async function resetTokens() {
+  // Local reset only (server counter keeps running across server restarts)
+  renderTokenStats({ total_tokens: 0, input_tokens: 0, output_tokens: 0,
+                     api_calls: 0, sessions: 0, last_updated: null });
+}
+
+// ── Companies ─────────────────────────────────────────────
 async function loadCompanies() {
-    const topN = document.getElementById('top-n-select').value;
-    const url = topN ? `${API_BASE_URL}/companies?top_n=${topN}` : `${API_BASE_URL}/companies`;
-    
-    document.getElementById('companies-loading').style.display = 'block';
-    document.getElementById('companies-table-container').innerHTML = '';
-    
-    try {
-        const response = await fetch(url);
-        const data = await response.json();
-        companies = data;
-        displayCompanies(data);
-    } catch (error) {
-        document.getElementById('companies-table-container').innerHTML = 
-            `<div class="error">Error loading companies: ${error.message}</div>`;
-    } finally {
-        document.getElementById('companies-loading').style.display = 'none';
-    }
+  const topN = document.getElementById('topNSelect').value;
+  const url  = topN ? `${BASE}/companies?top_n=${topN}` : `${BASE}/companies`;
+  showSkeletons(true);
+  document.getElementById('companiesContainer').innerHTML = '';
+  try {
+    const res  = await fetch(url);
+    const data = await res.json();
+    allCompanies = data;
+    renderCompanies(data);
+  } catch (err) {
+    document.getElementById('companiesContainer').innerHTML =
+      `<div class="error-msg">Failed to load companies: ${err.message}</div>`;
+  } finally {
+    showSkeletons(false);
+  }
+}
+function showSkeletons(show) {
+  document.getElementById('companiesLoading').style.display = show ? 'flex' : 'none';
+}
+function renderCompanies(data) {
+  const container = document.getElementById('companiesContainer');
+  if (!data.length) {
+    container.innerHTML = `<div class="empty-state"><div class="es-icon">🏢</div><h3>No companies found</h3></div>`;
+    return;
+  }
+  container.innerHTML = cardView ? buildCards(data) : buildTable(data);
 }
 
-function displayCompanies(data) {
-    const container = document.getElementById('companies-table-container');
-    
-    if (data.length === 0) {
-        container.innerHTML = '<div class="loading">No companies found</div>';
-        return;
-    }
-    
-    let html = `
-        <table>
-            <thead>
-                <tr>
-                    <th>Rank</th>
-                    <th>Company Name</th>
-                    <th>Market Cap (Cr)</th>
-                    <th>P/E Ratio</th>
-                    <th>ROCE %</th>
-                    <th>Investment Score</th>
-                    <th>Action</th>
-                </tr>
-            </thead>
-            <tbody>
-    `;
-    
-    data.forEach(company => {
-        const rankClass = company.rank === 1 ? 'rank-1' : 
-                         company.rank === 2 ? 'rank-2' : 
-                         company.rank === 3 ? 'rank-3' : 'rank-other';
-        
-        html += `
-            <tr>
-                <td data-label="Rank"><span class="rank-badge ${rankClass}">${company.rank}</span></td>
-                <td data-label="Company Name"><strong>${company.name}</strong></td>
-                <td data-label="Market Cap (Cr)">${company.market_cap}</td>
-                <td data-label="P/E Ratio">${company.pe_ratio}</td>
-                <td data-label="ROCE %">${company.roce}</td>
-                <td data-label="Investment Score">${parseFloat(company.investment_score).toFixed(4)}</td>
-                <td data-label="Action"><button onclick="selectCompanyForResearch('${company.name}', ${company.rank})" class="btn-primary">Select</button></td>
-            </tr>
-        `;
-    });
-    
-    html += `</tbody></table>`;
-    container.innerHTML = html;
+function buildTable(data) {
+  const maxScore = Math.max(...data.map(c => parseFloat(c.investment_score) || 0));
+  let html = `<div class="table-wrap"><table>
+    <thead><tr>
+      <th>Rank</th><th>Company</th><th>Mkt Cap (Cr)</th>
+      <th>P/E</th><th>ROCE %</th><th>Score</th><th></th>
+    </tr></thead><tbody>`;
+  data.forEach(c => {
+    const score = parseFloat(c.investment_score) || 0;
+    const pct   = maxScore > 0 ? (score / maxScore * 100).toFixed(1) : 0;
+    const rClass = c.rank === 1 ? 'rank-1' : c.rank === 2 ? 'rank-2' : c.rank === 3 ? 'rank-3' : 'rank-other';
+    html += `<tr>
+      <td><span class="rank-badge ${rClass}">${c.rank}</span></td>
+      <td><span class="company-name">${esc(c.name)}</span></td>
+      <td><span class="metric-val">${esc(c.market_cap)}</span></td>
+      <td><span class="metric-val">${esc(c.pe_ratio)}</span></td>
+      <td><span class="metric-val">${esc(c.roce)}</span></td>
+      <td class="score-cell">
+        <div class="score-bar-wrap">
+          <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%"></div></div>
+          <span class="score-num">${score.toFixed(3)}</span>
+        </div>
+      </td>
+      <td><button class="btn btn-ghost btn-sm" onclick="selectForResearch('${esc(c.name)}',${c.rank})">Analyse</button></td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>`;
+  return html;
 }
 
-// Load Algorithm
+function buildCards(data) {
+  const maxScore = Math.max(...data.map(c => parseFloat(c.investment_score) || 0));
+  let html = '<div class="cards-grid">';
+  data.forEach(c => {
+    const score = parseFloat(c.investment_score) || 0;
+    const pct   = maxScore > 0 ? (score / maxScore * 100).toFixed(1) : 0;
+    const rClass = c.rank === 1 ? 'rank-1' : c.rank === 2 ? 'rank-2' : c.rank === 3 ? 'rank-3' : 'rank-other';
+    html += `<div class="company-card">
+      <div class="cc-header">
+        <span class="cc-name">${esc(c.name)}</span>
+        <span class="rank-badge ${rClass}">${c.rank}</span>
+      </div>
+      <div class="cc-metrics">
+        <div class="cc-metric"><label>Mkt Cap</label><div class="val">${esc(c.market_cap)}</div></div>
+        <div class="cc-metric"><label>P/E</label><div class="val">${esc(c.pe_ratio)}</div></div>
+        <div class="cc-metric"><label>ROCE %</label><div class="val">${esc(c.roce)}</div></div>
+      </div>
+      <div class="cc-score">
+        <label>Score <span>${score.toFixed(4)}</span></label>
+        <div class="cc-score-bar"><div class="cc-score-fill" style="width:${pct}%"></div></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center"
+        onclick="selectForResearch('${esc(c.name)}',${c.rank})">⚗ Analyse</button>
+    </div>`;
+  });
+  html += '</div>';
+  return html;
+}
+
+function toggleView() {
+  cardView = !cardView;
+  document.getElementById('toggleViewBtn').textContent = cardView ? '☰ Table' : '⊞ Cards';
+  renderCompanies(allCompanies);
+}
+function selectForResearch(name) {
+  switchToTab('research');
+  document.getElementById('companySelect').value = name;
+  document.getElementById('companyInput').value  = name;
+  document.getElementById('progressPanel').style.display = 'none';
+  document.getElementById('resultsPanel').style.display  = 'none';
+}
+
+// ── Algorithm ─────────────────────────────────────────────
 async function loadAlgorithm() {
-    try {
-        const response = await fetch(`${API_BASE_URL}/scoring-algorithm`);
-        const data = await response.json();
-        displayAlgorithm(data);
-    } catch (error) {
-        document.getElementById('algorithm-content').innerHTML = 
-            `<div class="error">Error loading algorithm: ${error.message}</div>`;
-    }
+  try {
+    const res  = await fetch(`${BASE}/scoring-algorithm`);
+    const data = await res.json();
+    renderAlgorithm(data);
+  } catch (err) {
+    document.getElementById('algorithmContent').innerHTML =
+      `<div class="error-msg">Failed to load: ${err.message}</div>`;
+  }
+}
+function renderAlgorithm(data) {
+  const maxW = Math.max(...Object.values(data.weights));
+  const weightsHtml = Object.entries(data.weights).map(([key, val]) => {
+    const pct  = (val * 100).toFixed(0);
+    const barW = (val / maxW * 100).toFixed(1);
+    return `<div class="weight-card">
+      <div class="wc-top"><span class="wc-name">${key.replace(/_/g,' ')}</span><span class="wc-pct">${pct}%</span></div>
+      <div class="wc-bar"><div class="wc-bar-fill" style="width:${barW}%"></div></div>
+      <div class="wc-desc">${data.metrics[key] || key}</div>
+    </div>`;
+  }).join('');
+  const stepsHtml = data.process.map((step, i) => `
+    <div class="process-step">
+      <div class="ps-num">${i + 1}</div>
+      <div class="ps-text">${step.replace(/^\d+\.\s*/,'')}</div>
+    </div>`).join('');
+  document.getElementById('algorithmContent').innerHTML = `
+    <div class="algo-content">
+      <div class="algo-section">
+        <h3>Overview</h3>
+        <p style="color:var(--text2);font-size:14px;line-height:1.7">${data.description}</p>
+      </div>
+      <div class="algo-section"><h3>Metric Weights</h3><div class="weights-grid">${weightsHtml}</div></div>
+      <div class="algo-section"><h3>Scoring Process</h3><div class="process-steps">${stepsHtml}</div></div>
+    </div>`;
 }
 
-function displayAlgorithm(data) {
-    let html = `
-        <div class="algorithm-section">
-            <h3>Algorithm Description</h3>
-            <p>${data.description}</p>
-        </div>
-        
-        <div class="algorithm-section">
-            <h3>Weight Distribution</h3>
-            <div class="weights-grid">
-    `;
-    
-    Object.entries(data.weights).forEach(([key, value]) => {
-        const metric = data.metrics[key] || key;
-        html += `
-            <div class="weight-card">
-                <h4>${key.replace(/_/g, ' ').toUpperCase()}</h4>
-                <div class="weight">${(value * 100).toFixed(0)}%</div>
-                <div class="description">${metric}</div>
-            </div>
-        `;
-    });
-    
-    html += `</div></div>`;
-    
-    html += `
-        <div class="algorithm-section">
-            <h3>Processing Steps</h3>
-            <ul class="process-list">
-    `;
-    
-    data.process.forEach(step => {
-        html += `<li>${step}</li>`;
-    });
-    
-    html += `</ul></div>`;
-    
-    document.getElementById('algorithm-content').innerHTML = html;
-}
-
-// Load Companies for Select
 async function loadCompaniesForSelect() {
-    try {
-        const response = await fetch(`${API_BASE_URL}/companies?top_n=100`);
-        const data = await response.json();
-        
-        const select = document.getElementById('company-select');
-        data.forEach(company => {
-            const option = document.createElement('option');
-            option.value = company.name;
-            option.textContent = `${company.rank}. ${company.name}`;
-            select.appendChild(option);
-        });
-    } catch (error) {
-        console.error('Error loading companies for select:', error);
-    }
-}
-
-function updateCompanyName() {
-    const select = document.getElementById('company-select');
-    const input = document.getElementById('company-name-input');
-    input.value = select.value;
-}
-
-function updateCompanySelect() {
-    const select = document.getElementById('company-select');
-    const input = document.getElementById('company-name-input');
-    select.value = input.value;
-}
-
-function selectCompanyForResearch(companyName, rank) {
-    showTab('research');
-    document.getElementById('company-select').value = companyName;
-    document.getElementById('company-name-input').value = companyName;
-}
-
-// Start Research
-async function startResearch() {
-    const companyName = document.getElementById('company-name-input').value.trim();
-    const companySelect = document.getElementById('company-select').value;
-    
-    if (!companyName && !companySelect) {
-        alert('Please select or enter a company name');
-        return;
-    }
-    
-    const selectedCompany = companyName || companySelect;
-    
-    // Find rank if company is in the list
-    const company = companies.find(c => c.name === selectedCompany);
-    const companyRank = company ? company.rank : null;
-    
-    try {
-        document.getElementById('start-research-btn').disabled = true;
-        document.getElementById('start-research-btn').textContent = 'Starting...';
-        
-        const response = await fetch(`${API_BASE_URL}/research/start`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                company_name: selectedCompany,
-                company_rank: companyRank
-            })
-        });
-        
-        const data = await response.json();
-        currentResearchId = data.research_id;
-        
-        // Show status container
-        document.getElementById('research-status-container').style.display = 'block';
-        document.getElementById('research-id-display').textContent = `Research ID: ${data.research_id}`;
-        
-        // Start polling for status
-        startStatusPolling(data.research_id);
-        
-    } catch (error) {
-        alert(`Error starting research: ${error.message}`);
-    } finally {
-        document.getElementById('start-research-btn').disabled = false;
-        document.getElementById('start-research-btn').textContent = '🚀 Start Research';
-    }
-}
-
-// Poll for Status
-function startStatusPolling(researchId) {
-    if (statusPollInterval) {
-        clearInterval(statusPollInterval);
-    }
-    
-    statusPollInterval = setInterval(async () => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/research/status/${researchId}`);
-            const status = await response.json();
-            
-            updateStatusDisplay(status);
-            
-            if (status.status === 'completed' || status.status === 'error') {
-                clearInterval(statusPollInterval);
-                
-                if (status.status === 'completed') {
-                    loadResults(researchId);
-                }
-            }
-        } catch (error) {
-            console.error('Error polling status:', error);
-        }
-    }, 2000); // Poll every 2 seconds
-}
-
-function updateStatusDisplay(status) {
-    // Update progress bar
-    const progress = (status.progress.current / status.progress.total) * 100;
-    document.getElementById('progress-fill').style.width = `${progress}%`;
-    document.getElementById('progress-fill').textContent = `${Math.round(progress)}%`;
-    
-    // Show detailed message if available
-    let message = status.progress.message;
-    if (status.progress.details) {
-        const details = status.progress.details;
-        if (details.subtopic) {
-            message = `[${details.category?.replace(/_/g, ' ').toUpperCase() || ''}] ${details.message || 'Processing...'}`;
-        } else if (details.category) {
-            message = details.message || `Processing ${details.category.replace(/_/g, ' ').title()}...`;
-        }
-    }
-    document.getElementById('progress-text').textContent = message;
-    
-    // Update steps
-    const stepsContainer = document.getElementById('steps-container');
-    const steps = [
-        { id: 'company_selected', name: 'Company Selection', message: 'Company selected and validated' },
-        { id: 'research_agent', name: 'Research Agent', message: 'Gathering evidence from web sources' },
-        { id: 'report_generation', name: 'Report Generation', message: 'Creating analyst report' },
-        { id: 'validation', name: 'Validation', message: 'Validating buy/avoid decision' },
-        { id: 'completed', name: 'Completed', message: 'Research completed successfully' }
-    ];
-    
-    // Map step IDs to indices for checking previous steps
-    const stepIndexMap = {
-        'company_selected': 0,
-        'research_agent': 1,
-        'report_generation': 2,
-        'validation': 3,
-        'completed': 4
-    };
-    
-    let html = '';
-    steps.forEach((step, index) => {
-        let stepStatus = 'pending';
-        let stepMessage = step.message;
-        const currentStepIndex = stepIndexMap[status.current_step] || -1;
-        
-        // Mark previous steps as completed when a new step starts
-        if (currentStepIndex > index) {
-            stepStatus = 'completed';
-        } else if (status.current_step === step.id) {
-            stepStatus = 'active';
-            // Show detailed progress if available
-            if (status.progress.details) {
-                const details = status.progress.details;
-                if (details.subtopic && step.id === 'research_agent') {
-                    stepMessage = `Searching: ${details.subtopic} (${details.subtopic_number}/${details.total_subtopics})`;
-                    if (details.results_found !== undefined) {
-                        stepMessage += ` - Found ${details.results_found} results`;
-                    }
-                }
-            }
-        } else if (status.current_step === 'completed' && index < 4) {
-            stepStatus = 'completed';
-        } else if (status.current_step === 'error') {
-            if (index >= status.progress.current - 1) {
-                stepStatus = 'error';
-                if (status.error) {
-                    stepMessage = `Error: ${status.error}`;
-                }
-            } else if (index < status.progress.current - 1) {
-                stepStatus = 'completed';
-            }
-        }
-        
-        html += `
-            <div class="step-item ${stepStatus}">
-                <div class="step-header">
-                    <span class="step-title">${step.name}</span>
-                    <span class="step-status ${stepStatus}">${stepStatus.charAt(0).toUpperCase() + stepStatus.slice(1)}</span>
-                </div>
-                <div class="step-message">${stepMessage}</div>
-                ${status.progress.details && status.progress.details.error ? `<div class="step-error" style="color: #dc3545; margin-top: 5px; font-size: 0.85em;">⚠️ ${status.progress.details.error}</div>` : ''}
-            </div>
-        `;
+  try {
+    const res  = await fetch(`${BASE}/companies?top_n=100`);
+    const data = await res.json();
+    const sel  = document.getElementById('companySelect');
+    // Clear existing options except the placeholder
+    while (sel.options.length > 1) sel.remove(1);
+    data.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.name;
+      opt.textContent = `${c.rank}. ${c.name}`;
+      sel.appendChild(opt);
     });
-    
-    stepsContainer.innerHTML = html;
-    
-    // Show detailed progress if available
-    if (status.progress.details) {
-        updateDetailedProgress(status.progress.details);
-    }
+  } catch { /* silent */ }
 }
 
-function updateDetailedProgress(details) {
-    const container = document.getElementById('detailed-progress');
-    const content = document.getElementById('detailed-progress-content');
-    
-    if (!details || (!details.category && !details.subtopic)) {
-        container.style.display = 'none';
-        return;
+// ── Research ──────────────────────────────────────────────
+async function startResearch() {
+  const fromSelect = document.getElementById('companySelect').value;
+  const fromInput  = document.getElementById('companyInput').value.trim();
+  const name = fromInput || fromSelect;
+  if (!name) { alert('Please select or enter a company name'); return; }
+
+  const company = allCompanies.find(c => c.name === name);
+  const rank    = company ? company.rank : null;
+  const btn     = document.getElementById('startBtn');
+  btn.disabled  = true;
+  btn.textContent = '⏳ Starting…';
+
+  try {
+    const res = await fetch(`${BASE}/research/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company_name: name, company_rank: rank }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Failed to start');
     }
-    
-    container.style.display = 'block';
-    
-    let html = '';
-    
-    if (details.category) {
-        const categoryName = details.category.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-        html += `<div class="detailed-progress-item ${details.error ? 'error' : 'active'}">`;
-        html += `<div class="detailed-progress-category">📁 ${categoryName}`;
-        if (details.category_number && details.total_categories) {
-            html += ` <span style="color: #667eea;">(${details.category_number}/${details.total_categories})</span>`;
-        }
-        html += `</div>`;
-        
-        if (details.subtopic) {
-            html += `<div class="detailed-progress-subtopic">`;
-            html += `  🔍 ${details.subtopic}`;
-            if (details.subtopic_number && details.total_subtopics) {
-                html += ` <span style="color: #667eea;">(${details.subtopic_number}/${details.total_subtopics})</span>`;
-            }
-            html += `</div>`;
-            
-            if (details.results_found !== undefined) {
-                html += `<div class="detailed-progress-stats">✓ Found ${details.results_found} results</div>`;
-            }
-        }
-        
-        if (details.error) {
-            html += `<div style="color: #dc3545; margin-top: 5px;">⚠️ ${details.error}</div>`;
-        }
-        
-        html += `</div>`;
-    }
-    
-    content.innerHTML = html;
+    const data = await res.json();
+    currentJobId   = data.research_id;
+    currentCompany = data.company_name;
+
+    document.getElementById('progressPanel').style.display = 'block';
+    document.getElementById('resultsPanel').style.display  = 'none';
+    document.getElementById('progressCompany').textContent = data.company_name;
+    document.getElementById('jobId').textContent = `ID: ${data.research_id.slice(0,8)}…`;
+    document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('progressPct').textContent   = '0%';
+    resetTimeline();
+    startPolling(data.research_id);
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = '▶ Start Research';
+  }
 }
 
-// Load Results
-async function loadResults(researchId) {
-    try {
-        const response = await fetch(`${API_BASE_URL}/research/results/${researchId}`);
-        const results = await response.json();
-        
-        displayResults(results);
-        document.getElementById('results-container').style.display = 'block';
-    } catch (error) {
-        console.error('Error loading results:', error);
+function startPolling(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => pollStatus(jobId), 3000);
+}
+async function pollStatus(jobId) {
+  try {
+    const res    = await fetch(`${BASE}/research/status/${jobId}`);
+    const status = await res.json();
+    updateProgress(status);
+    if (status.status === 'completed') {
+      clearInterval(pollTimer);
+      loadResults(jobId);
+      fetchTokenStats();   // refresh token counter after completion
+    } else if (status.status === 'error') {
+      clearInterval(pollTimer);
     }
+  } catch { /* ignore network hiccup */ }
+}
+function updateProgress(status) {
+  const prog = status.progress;
+  const pct  = Math.round((prog.current / prog.total) * 100);
+  document.getElementById('progressFill').style.width = `${pct}%`;
+  document.getElementById('progressPct').textContent  = `${pct}%`;
+  document.getElementById('liveLog').textContent      = `› ${prog.message || ''}`;
+  updateTimeline(status);
 }
 
-function displayResults(results) {
-    const summary = document.getElementById('results-summary');
-    summary.innerHTML = `
-        <h3>Research Complete!</h3>
-        <div class="result-item">
-            <strong>Recommendation:</strong> <span style="font-size: 1.2em; font-weight: bold;">${results.recommendation}</span>
-        </div>
-        <div class="result-item">
-            <strong>Confidence:</strong> ${results.confidence}
-        </div>
-        <div class="result-item">
-            <strong>Expected 3-Year Return:</strong> ${results.validation.expected_return_3y || 'N/A'}
-        </div>
-        <div class="result-item">
-            <strong>Probability of 40%+ Return:</strong> ${results.validation.probability_40pct_return || 'N/A'}
-        </div>
-    `;
-    
-    // Display report preview
-    const preview = document.getElementById('report-preview');
-    preview.textContent = results.report.substring(0, 2000) + (results.report.length > 2000 ? '...' : '');
+const STEP_ORDER = ['company_selected','research_agent','report_generation','validation','completed'];
+function resetTimeline() {
+  document.querySelectorAll('.tl-step').forEach(el => el.classList.remove('done','active','error'));
 }
-
-// Download Report
-async function downloadReport() {
-    if (!currentResearchId) return;
-    
-    try {
-        const statusResponse = await fetch(`${API_BASE_URL}/research/status/${currentResearchId}`);
-        const status = await statusResponse.json();
-        
-        const response = await fetch(`${API_BASE_URL}/reports/${encodeURIComponent(status.company_name)}`);
-        const blob = await response.blob();
-        
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${status.company_name}_Analyst_Report_${new Date().toISOString().split('T')[0]}.md`;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-    } catch (error) {
-        alert(`Error downloading report: ${error.message}`);
+function updateTimeline(status) {
+  const cur    = status.current_step;
+  const curIdx = STEP_ORDER.indexOf(cur);
+  STEP_ORDER.forEach((step, idx) => {
+    const el = document.querySelector(`.tl-step[data-step="${step}"]`);
+    if (!el) return;
+    el.classList.remove('done','active','error');
+    if (status.status === 'error') {
+      if (idx < curIdx)  el.classList.add('done');
+      else if (step === cur) el.classList.add('error');
+    } else if (cur === 'completed') {
+      el.classList.add('done');
+    } else {
+      if (idx < curIdx)  el.classList.add('done');
+      else if (step === cur) el.classList.add('active');
     }
+    if (step === cur && status.status !== 'error') {
+      const msg = status.progress.message || '';
+      if (msg) el.querySelector('.tl-msg').textContent = msg;
+    }
+    if (status.status === 'error' && step === cur) {
+      el.querySelector('.tl-msg').textContent = status.error || 'An error occurred';
+    }
+  });
 }
 
-// View Report
+async function loadResults(jobId) {
+  try {
+    const res  = await fetch(`${BASE}/research/results/${jobId}`);
+    const data = await res.json();
+    renderResults(data);
+    document.getElementById('resultsPanel').style.display = 'block';
+    document.getElementById('resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    console.error('Could not load results:', err);
+  }
+}
+function renderResults(data) {
+  const rec  = (data.recommendation || '').toUpperCase();
+  const val  = data.validation || {};
+  const card = document.getElementById('verdictCard');
+  card.className = 'verdict-card' + (rec === 'BUY' ? ' buy' : rec === 'AVOID' ? ' avoid' : '');
+  document.getElementById('verdictRec').textContent    = rec || '—';
+  document.getElementById('verdictConf').textContent   = val.confidence || data.confidence || '—';
+  document.getElementById('verdictReturn').textContent = val.expected_return_3y || '—';
+  document.getElementById('verdictProb').textContent   = val.probability_40pct_return || '—';
+
+  // Show tokens used for this job
+  const tokensUsed = data.tokens_used;
+  if (tokensUsed) {
+    document.getElementById('verdictTokens').textContent =
+      (tokensUsed.total_tokens || 0).toLocaleString();
+  }
+
+  // Gap 4: show TLDR if available
+  const tldrCard = document.getElementById('tldrCard');
+  const tldrText = document.getElementById('tldrText');
+  if (data.tldr && tldrCard && tldrText) {
+    tldrText.textContent = data.tldr;
+    tldrCard.style.display = 'block';
+    tldrCard.className = 'tldr-card' + (rec === 'BUY' ? ' buy' : rec === 'AVOID' ? ' avoid' : '');
+  } else if (tldrCard) {
+    tldrCard.style.display = 'none';
+  }
+}
+
 async function viewReport() {
-    if (!currentResearchId) return;
-    
-    try {
-        const statusResponse = await fetch(`${API_BASE_URL}/research/status/${currentResearchId}`);
-        const status = await statusResponse.json();
-        
-        const response = await fetch(`${API_BASE_URL}/research/results/${currentResearchId}`);
-        const results = await response.json();
-        
-        const preview = document.getElementById('report-preview');
-        
-        // Get full report markdown from the report file
-        const reportResponse = await fetch(`${API_BASE_URL}/reports/${encodeURIComponent(status.company_name)}`);
-        const reportText = await reportResponse.text();
-        
-        // Convert markdown to HTML using marked.js
-        if (typeof marked !== 'undefined') {
-            preview.innerHTML = marked.parse(reportText);
-        } else {
-            // Fallback: display as plain text with basic formatting
-            preview.textContent = reportText;
-        }
-        
-        preview.style.display = 'block';
-        preview.scrollTop = 0;
-    } catch (error) {
-        alert(`Error viewing report: ${error.message}`);
-    }
+  if (!currentJobId) return;
+  try {
+    const statusRes = await fetch(`${BASE}/research/status/${currentJobId}`);
+    const status    = await statusRes.json();
+    const reportRes = await fetch(`${BASE}/reports/${encodeURIComponent(status.company_name)}`);
+    const text      = await reportRes.text();
+    const viewer = document.getElementById('reportViewer');
+    document.getElementById('reportTitle').textContent = `${status.company_name} — Analyst Report`;
+    document.getElementById('reportBody').innerHTML    = marked.parse(text);
+    viewer.style.display = 'block';
+    viewer.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) { alert(`Could not load report: ${err.message}`); }
+}
+async function downloadReport() {
+  if (!currentJobId) return;
+  try {
+    const statusRes = await fetch(`${BASE}/research/status/${currentJobId}`);
+    const status    = await statusRes.json();
+    const res       = await fetch(`${BASE}/reports/${encodeURIComponent(status.company_name)}`);
+    const blob      = await res.blob();
+    const url       = URL.createObjectURL(blob);
+    const a         = document.createElement('a');
+    a.href = url; a.download = `${status.company_name}_Analyst_Report.md`;
+    document.body.appendChild(a); a.click();
+    URL.revokeObjectURL(url); a.remove();
+  } catch (err) { alert(`Download failed: ${err.message}`); }
 }
 
+// ── Reports tab ────────────────────────────────────────────
+async function loadReports() {
+  const container = document.getElementById('reportsContainer');
+  container.innerHTML = '<div class="loading-text">Loading reports…</div>';
+  try {
+    const res  = await fetch(`${BASE}/reports/list`);
+    const data = await res.json();
+    if (!data.reports || !data.reports.length) {
+      container.innerHTML = `<div class="empty-state">
+        <div class="es-icon">📄</div><h3>No reports yet</h3>
+        <p>Run a research analysis to generate your first report.</p></div>`;
+      return;
+    }
+    let html = '<div class="reports-list">';
+    data.reports.forEach(r => {
+      html += `<div class="report-item">
+        <div>
+          <div class="ri-name">${esc(r.company_name)}</div>
+          <div class="ri-meta">${r.date} · ${(r.size/1024).toFixed(1)} KB</div>
+        </div>
+        <div class="ri-actions">
+          <button class="btn btn-ghost btn-sm" onclick="openReportModal('${esc(r.company_name)}')">📖 View</button>
+          <a class="btn btn-ghost btn-sm" href="${BASE}/reports/${encodeURIComponent(r.company_name)}"
+             download="${esc(r.filename)}">⬇ DL</a>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  } catch (err) {
+    container.innerHTML = `<div class="error-msg">Failed to load reports: ${err.message}</div>`;
+  }
+}
+async function openReportModal(companyName) {
+  try {
+    const res  = await fetch(`${BASE}/reports/${encodeURIComponent(companyName)}`);
+    const text = await res.text();
+    document.getElementById('modalTitle').textContent = `${companyName} — Analyst Report`;
+    document.getElementById('modalBody').innerHTML    = marked.parse(text);
+    document.getElementById('reportModal').style.display = 'flex';
+  } catch (err) { alert(`Could not load: ${err.message}`); }
+}
+function closeModal() {
+  document.getElementById('reportModal').style.display = 'none';
+}
+
+// ── Inline API key banner ─────────────────────────────────
+async function saveBannerKey() {
+  const input    = document.getElementById('bannerKeyInput');
+  const btn      = document.getElementById('bannerSaveBtn');
+  const feedback = document.getElementById('bannerFeedback');
+  const newKey   = input.value.trim();
+  if (!newKey) return;
+
+  btn.disabled      = true;
+  btn.textContent   = '⏳';
+  feedback.style.display = 'none';
+
+  try {
+    const res  = await fetch(`${BASE}/settings/api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: newKey }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Verification failed');
+
+    // Success — key is now active
+    input.value          = '';
+    feedback.textContent = '✓ Key activated! You can now start research.';
+    feedback.className   = 'akb-feedback success';
+    feedback.style.display = 'block';
+
+    // Refresh settings everywhere and hide banner
+    applySettings(data);
+    await loadCompanies();
+    await loadCompaniesForSelect();
+    fetchTokenStats();
+
+  } catch (err) {
+    feedback.textContent = `✗ ${err.message}`;
+    feedback.className   = 'akb-feedback error';
+    feedback.style.display = 'block';
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Activate';
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────
+function esc(str) {
+  return String(str ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }

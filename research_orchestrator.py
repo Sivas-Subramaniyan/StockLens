@@ -240,15 +240,16 @@ class ResearchOrchestrator:
         print("="*60)
         
         try:
-            filepath = self.summarization_agent.save_report(
+            filepath, tldr = self.summarization_agent.save_report(
                 company_name=state["company_name"],
                 report=state["analyst_report"],
                 validation=state["validation_result"],
                 output_dir=self.reports_dir
             )
-            
+
             state["report_file_path"] = filepath
-            
+            state["tldr"] = tldr
+
             print(f"\n[OK] Final report saved: {filepath}")
             
             return state
