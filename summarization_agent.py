@@ -97,7 +97,12 @@ class SummarizationAgent:
     def __init__(self, gemini_api_key: str, model: str = DEFAULT_MODEL,
                  risk_profile: RiskProfile = None):
         from google import genai
-        self._client = genai.Client(api_key=gemini_api_key)
+        from google.genai import types as _t
+        # 3-minute timeout per request — prevents indefinite hangs on slow/stalled API calls
+        self._client = genai.Client(
+            api_key=gemini_api_key,
+            http_options=_t.HttpOptions(timeout=180),
+        )
         self.model = model
         self._last_call_time = 0.0
         self.risk_profile = risk_profile or RiskProfile()   # default = Balanced
@@ -160,6 +165,13 @@ class SummarizationAgent:
             )
             if json_mode:
                 config_kwargs["response_mime_type"] = "application/json"
+            # Limit thinking budget for gemini-2.5 models — without this the model
+            # can spend 20 000+ thinking tokens per call, causing multi-minute hangs.
+            if "2.5" in model:
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=2048)
+                except Exception:
+                    pass  # older SDK build without ThinkingConfig — skip silently
             config = types.GenerateContentConfig(**config_kwargs)
 
             for attempt in range(1, 4):  # up to 3 attempts per model
