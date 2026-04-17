@@ -12,6 +12,19 @@ let currentCompany = null;
 let tokenPollTimer = null;
 let popoverOpen    = false;
 
+// ── Session key helpers ───────────────────────────────────
+// sessionStorage is scoped to the browser tab — cleared automatically
+// when the tab is closed, ensuring every new visitor starts fresh.
+const SESSION_KEY_NAME = 'sl_gemini_key';
+
+function getSessionKey()         { return sessionStorage.getItem(SESSION_KEY_NAME) || ''; }
+function setSessionKey(key)      { sessionStorage.setItem(SESSION_KEY_NAME, key); }
+function clearSessionKey()       { sessionStorage.removeItem(SESSION_KEY_NAME); }
+function sessionKeyHeaders()     {
+  const k = getSessionKey();
+  return k ? { 'X-Gemini-Key': k } : {};
+}
+
 // ── Init ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
@@ -131,7 +144,10 @@ async function fetchSettings() {
     const res  = await fetch(`${BASE}/settings`);
     const data = await res.json();
     applySettings(data);
-  } catch { /* server might not be up yet */ }
+  } catch {
+    // Server not up yet — still apply session state from sessionStorage
+    applySettings({});
+  }
 }
 
 function applySettings(data) {
@@ -141,10 +157,14 @@ function applySettings(data) {
   const kcSt  = document.getElementById('kcStatus');
   const badge = document.getElementById('badgeModel');
 
-  kcVal.textContent = data.key_label || '—';
   if (data.model) badge.textContent = data.model.replace('models/', '');
 
-  const isActive = data.key_status === 'active';
+  // Key status is always derived from this browser session,
+  // not from the server — so different visitors are fully independent.
+  const sessionKey = getSessionKey();
+  const isActive   = !!sessionKey;
+
+  kcVal.textContent = isActive ? (data.key_label || maskKey(sessionKey)) : '—';
 
   if (isActive) {
     dot.className     = 'ks-dot active';
@@ -156,9 +176,10 @@ function applySettings(data) {
     label.textContent = 'Invalid key';
     kcSt.textContent  = '✗ Invalid';
     kcSt.className    = 'kc-status invalid';
+    clearSessionKey();
   } else {
     dot.className     = 'ks-dot checking';
-    label.textContent = data.has_key ? 'Unverified' : 'No key set';
+    label.textContent = 'Enter key';
     kcSt.textContent  = '';
     kcSt.className    = 'kc-status';
   }
@@ -166,6 +187,11 @@ function applySettings(data) {
   // Show / hide the inline API key banner in the Research tab
   const banner = document.getElementById('apiKeyBanner');
   if (banner) banner.style.display = isActive ? 'none' : 'flex';
+}
+
+function maskKey(key) {
+  if (!key || key.length < 8) return '***';
+  return key.slice(0, 4) + '…' + key.slice(-4);
 }
 
 // ── Settings drawer open/close ────────────────────────────
@@ -240,6 +266,9 @@ async function saveApiKey() {
     await delay(600);
     ri.style.display = 'none';
     riMsg.textContent = 'System ready.';
+
+    // Store in this browser session only (cleared on tab close)
+    setSessionKey(newKey);
 
     // Clear the input
     document.getElementById('keyInput').value = '';
@@ -518,7 +547,7 @@ async function startResearch() {
   try {
     const res = await fetch(`${BASE}/research/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...sessionKeyHeaders() },
       body: JSON.stringify({ company_name: name, company_rank: rank }),
     });
     if (!res.ok) {
@@ -751,6 +780,9 @@ async function saveBannerKey() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Verification failed');
+
+    // Store in this browser session only (cleared on tab close)
+    setSessionKey(newKey);
 
     // Success — key is now active
     input.value          = '';

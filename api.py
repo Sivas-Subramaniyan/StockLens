@@ -181,6 +181,24 @@ def get_gemini_key() -> str:
     return _config["gemini_api_key"]
 
 
+def _resolve_key(request: Request) -> str:
+    """
+    Return the Gemini API key to use for this request.
+
+    Priority:
+      1. X-Gemini-Key header  — sent by the browser from sessionStorage
+                                 (each visitor carries their own key)
+      2. GEMINI_API_KEY env var — for self-hosted / server-operator deployments
+
+    Deliberately does NOT fall back to the in-memory _config["gemini_api_key"]
+    so that one visitor's validated key can never be silently reused by another.
+    """
+    return (
+        request.headers.get("X-Gemini-Key", "").strip()
+        or os.getenv("GEMINI_API_KEY", "").strip()
+    )
+
+
 def _accumulate_tokens(agent: SummarizationAgent):
     """Add a finished agent's token stats to the global counter."""
     stats = agent.token_stats
@@ -458,12 +476,13 @@ async def get_token_stats():
 # ── Research endpoints ─────────────────────────────────────────────────────
 
 @app.post("/research/start")
-async def start_research(request: ResearchRequest):
-    # Guard: must have an API key
-    if not _config["gemini_api_key"]:
+async def start_research(request: ResearchRequest, http_request: Request):
+    # Resolve key: header (per-session) > env var > config
+    gemini_key = _resolve_key(http_request)
+    if not gemini_key:
         raise HTTPException(
             status_code=400,
-            detail="No Gemini API key configured. Please set it in Settings before starting research.",
+            detail="No Gemini API key provided. Please enter your key to start research.",
         )
 
     try:
@@ -494,7 +513,7 @@ async def start_research(request: ResearchRequest):
             "results":      None,
         }
 
-        t = threading.Thread(target=_run_sync, args=(research_id, company_data))
+        t = threading.Thread(target=_run_sync, args=(research_id, company_data, gemini_key))
         t.daemon = True
         t.start()
 
@@ -510,12 +529,12 @@ async def start_research(request: ResearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _run_sync(research_id: str, company_data: Dict):
+def _run_sync(research_id: str, company_data: Dict, gemini_key: str):
     import traceback
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(_run_workflow(research_id, company_data))
+        loop.run_until_complete(_run_workflow(research_id, company_data, gemini_key))
     except Exception as e:
         details = traceback.format_exc()
         job = research_jobs.get(research_id, {})
@@ -537,11 +556,11 @@ def _run_sync(research_id: str, company_data: Dict):
         loop.close()
 
 
-async def _run_workflow(research_id: str, company_data: Dict):
+async def _run_workflow(research_id: str, company_data: Dict, gemini_key: str):
     job            = research_jobs[research_id]
     company_name   = company_data["company_name"]
     financial_data = company_data["financial_data"]
-    gemini_key     = get_gemini_key()   # snapshot at start of job
+    # gemini_key is passed in per-request — never read from server config here
 
     # Step 1 ────────────────────────────────────────────────────────────────
     job.update({
