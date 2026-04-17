@@ -110,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── Theme ─────────────────────────────────────────────────
 function initTheme() {
-  const saved = localStorage.getItem('theme') || 'dark';
+  const saved = localStorage.getItem('theme') || 'light';
   document.documentElement.setAttribute('data-theme', saved);
   document.getElementById('themeToggle').textContent = saved === 'dark' ? '☀' : '🌙';
 }
@@ -428,7 +428,7 @@ function buildTable(data) {
           <span class="score-num">${score.toFixed(3)}</span>
         </div>
       </td>
-      <td><button class="btn btn-ghost btn-sm" onclick="selectForResearch('${esc(c.name)}',${c.rank})">Analyse</button></td>
+      <td><button class="btn btn-neutral btn-sm" onclick="selectForResearch('${esc(c.name)}',${c.rank})">Analyse</button></td>
     </tr>`;
   });
   html += `</tbody></table></div>`;
@@ -456,7 +456,7 @@ function buildCards(data) {
         <label>Score <span>${score.toFixed(4)}</span></label>
         <div class="cc-score-bar"><div class="cc-score-fill" style="width:${pct}%"></div></div>
       </div>
-      <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center"
+      <button class="btn btn-neutral btn-sm" style="width:100%;justify-content:center"
         onclick="selectForResearch('${esc(c.name)}',${c.rank})">⚗ Analyse</button>
     </div>`;
   });
@@ -735,8 +735,8 @@ async function loadReports() {
           <div class="ri-meta">${r.date} · ${(r.size/1024).toFixed(1)} KB</div>
         </div>
         <div class="ri-actions">
-          <button class="btn btn-ghost btn-sm" onclick="openReportModal('${esc(r.company_name)}')">📖 View</button>
-          <a class="btn btn-ghost btn-sm" href="${BASE}/reports/${encodeURIComponent(r.company_name)}"
+          <button class="btn btn-neutral btn-sm" onclick="openReportModal('${esc(r.company_name)}')">📖 View</button>
+          <a class="btn btn-neutral btn-sm" href="${BASE}/reports/${encodeURIComponent(r.company_name)}"
              download="${esc(r.filename)}">⬇ DL</a>
         </div>
       </div>`;
