@@ -1,0 +1,7 @@
+Market Capitalization < 20000
+AND Debt to equity < 0.5
+AND Return on capital employed > 15
+AND Free cash flow 3years  > 0
+AND Sales growth 3Years > 15
+AND EPS growth 3Years > 20
+AND Promoter holding > 50
