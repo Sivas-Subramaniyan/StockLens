@@ -127,33 +127,55 @@ class SummarizationAgent:
             time.sleep(min_interval - elapsed)
         self._last_call_time = time.time()
 
-    def _record_usage(self, response, model: str):
-        """Extract token counts from Gemini response metadata."""
+    def _record_usage(self, response, model: str, call_name: str = ""):
+        """Extract token counts from Gemini response metadata and log them."""
         try:
             um = response.usage_metadata
             if um:
-                inp = getattr(um, 'prompt_token_count', 0) or 0
-                out = getattr(um, 'candidates_token_count', 0) or 0
-                # 2.5-flash also has thoughts_token_count
-                thoughts = getattr(um, 'thoughts_token_count', 0) or 0
-                total = getattr(um, 'total_token_count', 0) or (inp + out + thoughts)
+                inp     = getattr(um, 'prompt_token_count',     0) or 0
+                out     = getattr(um, 'candidates_token_count', 0) or 0
+                # gemini-2.5-flash reports thinking tokens separately
+                thoughts = getattr(um, 'thoughts_token_count',  0) or 0
+                total    = getattr(um, 'total_token_count',      0) or (inp + out + thoughts)
 
                 self._token_stats["input_tokens"]  += inp
                 self._token_stats["output_tokens"] += out + thoughts
                 self._token_stats["total_tokens"]  += total
                 self._token_stats["api_calls"]     += 1
                 self._token_stats["model_used"]     = model
+
+                label = f" [{call_name}]" if call_name else ""
+                print(
+                    f"  [Tokens]{label} {model.split('/')[-1]} | "
+                    f"in={inp:,}  think={thoughts:,}  out={out:,}  "
+                    f"call_total={total:,}  session_total={self._token_stats['total_tokens']:,}"
+                )
         except Exception:
             # Don't let token tracking break the main flow
             self._token_stats["api_calls"] += 1
 
     def _generate(self, prompt: str, system: str, json_mode: bool,
-                  temperature: float, max_tokens: int) -> str:
+                  temperature: float, max_tokens: int,
+                  call_name: str = "", thinking_budget: int = 4096) -> str:
         """
         Core generation call with retry + model fallback.
-        Retries up to 3 times per model, then tries fallback models on 503.
+        Retries up to 3 times per model, then tries fallback models on 503/429.
+
+        Args:
+            call_name:       Label shown in token logs (e.g. "analyst_report").
+            thinking_budget: Max thinking tokens for gemini-2.5 models.
+                             Use higher values for complex reasoning tasks (report),
+                             lower for structured JSON output (validation).
         """
         from google.genai import types
+
+        # Log estimated prompt size so token spend is visible before the call
+        est_input_tokens = (len(prompt) + len(system)) // 4
+        print(
+            f"  [Gemini] {call_name or 'call'}: "
+            f"~{est_input_tokens:,} input tokens est. | max_out={max_tokens} | "
+            f"think_budget={thinking_budget if 'flash' in self.model else 'n/a'}"
+        )
 
         models_to_try = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
 
@@ -165,11 +187,14 @@ class SummarizationAgent:
             )
             if json_mode:
                 config_kwargs["response_mime_type"] = "application/json"
-            # Limit thinking budget for gemini-2.5 models — without this the model
-            # can spend 20 000+ thinking tokens per call, causing multi-minute hangs.
+            # Cap thinking tokens for gemini-2.5 models.
+            # Default (uncapped) can reach 24 000+ thinking tokens causing
+            # multi-minute hangs; the budget here is tuned per call type.
             if "2.5" in model:
                 try:
-                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=2048)
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_budget=thinking_budget
+                    )
                 except Exception:
                     pass  # older SDK build without ThinkingConfig — skip silently
             config = types.GenerateContentConfig(**config_kwargs)
@@ -185,8 +210,8 @@ class SummarizationAgent:
                     if model != self.model:
                         print(f"  [Gemini] Using fallback model: {model}")
 
-                    # Record token usage BEFORE potentially raising
-                    self._record_usage(response, model)
+                    # Record and log token usage BEFORE potentially raising
+                    self._record_usage(response, model, call_name)
 
                     # gemini-2.5-flash uses thinking tokens; response.text may be None
                     # when token budget is exhausted — extract from parts as fallback
@@ -214,7 +239,7 @@ class SummarizationAgent:
                         print(f"  [Gemini] 429 rate-limit on {model} — waiting {wait}s…")
                         time.sleep(wait)
                     else:
-                        print(f"  [Gemini] Error on {model}: {err_str[:120]}")
+                        print(f"  [Gemini] Error on {model}: {err_str[:200]}")
                         break  # non-retriable — try next model
 
             print(f"  [Gemini] All attempts failed for {model}, trying next…")
@@ -222,14 +247,18 @@ class SummarizationAgent:
         raise RuntimeError("All Gemini models exhausted. Please retry in a few minutes.")
 
     def _call_text(self, prompt: str, system: str = "", temperature: float = 0.2,
-                   max_tokens: int = 8192) -> str:
+                   max_tokens: int = 8192, call_name: str = "",
+                   thinking_budget: int = 4096) -> str:
         return self._generate(prompt, system, json_mode=False,
-                               temperature=temperature, max_tokens=max_tokens)
+                               temperature=temperature, max_tokens=max_tokens,
+                               call_name=call_name, thinking_budget=thinking_budget)
 
     def _call_json(self, prompt: str, system: str = "", temperature: float = 0.1,
-                   max_tokens: int = 4096) -> dict:
+                   max_tokens: int = 4096, call_name: str = "",
+                   thinking_budget: int = 2048) -> dict:
         raw = self._generate(prompt, system, json_mode=True,
-                              temperature=temperature, max_tokens=max_tokens)
+                              temperature=temperature, max_tokens=max_tokens,
+                              call_name=call_name, thinking_budget=thinking_budget)
         return json.loads(raw)
 
     # ── Load research outputs ────────────────────────────────────────────
@@ -424,7 +453,16 @@ class SummarizationAgent:
     # ── Create analyst report (1 Gemini call) ───────────────────────────
     def create_analyst_report(self, company_name: str, financial_data: Dict,
                                research_data: Dict) -> str:
-        research_text  = self._research_to_text(research_data)
+        # Tighter evidence budget: top-3 items/subtopic, shorter excerpts.
+        # The model still sees all 12 research categories — just the most
+        # signal-dense evidence per category rather than every item.
+        research_text  = self._research_to_text(
+            research_data,
+            max_chars=35_000,       # down from 60,000
+            max_items=3,            # down from 5
+            excerpt_chars=100,      # down from 150
+            full_content_chars=150, # down from 250
+        )
         financial_text = self._financial_to_text(financial_data)
         rt = self.risk_profile.return_threshold_pct
 
@@ -454,7 +492,12 @@ class SummarizationAgent:
 6. Weaknesses and risks FIRST, then strengths."""
 
         try:
-            return self._call_text(prompt, system=system, temperature=0.2, max_tokens=8192)
+            return self._call_text(
+                prompt, system=system, temperature=0.2,
+                max_tokens=5120,          # down from 8192 — still ample for a thorough report
+                call_name="analyst_report",
+                thinking_budget=4096,     # higher budget for complex reasoning
+            )
         except Exception as e:
             return f"Error generating report: {e}"
 
@@ -549,8 +592,11 @@ Output ONLY the paragraph — no headings, no markdown, no extra text."""
         Returns the same keys as validate_buy_avoid() plus a "tldr" key.
         Falls back to separate calls if the combined call fails.
         """
-        research_text  = self._research_to_text(research_data, max_chars=25_000)
-        report_snippet = report[:6000] + "…[truncated]" if len(report) > 6000 else report
+        # The analyst report was generated FROM the research evidence, so it already
+        # contains the key synthesis.  Re-sending the raw research (25 K chars) on top
+        # of the report is redundant and burns ~6 000 tokens.  We pass the full report
+        # instead — which is richer than the truncated snippet used previously.
+        report_snippet = report[:8000] + "…[truncated]" if len(report) > 8000 else report
         fd    = financial_data
         rt    = self.risk_profile.return_threshold_pct
         rules = self._build_validation_rules()
@@ -573,10 +619,7 @@ Output ONLY the paragraph — no headings, no markdown, no extra text."""
 - Working Capital Days: {fd.get('wc_days', 'N/A')}  |  Cash Cycle: {fd.get('cash_cycle', 'N/A')}
 - Industry P/E: {fd.get('ind_pe', 'N/A')}  |  Investment Score: {fd.get('investment_score', 'N/A')}
 
-## Research Evidence
-{research_text}
-
-## Analyst Report
+## Analyst Report (synthesises all research evidence)
 {report_snippet}
 
 ## Decision Rules
@@ -597,7 +640,12 @@ Return ONLY valid JSON with exactly these keys:
 }}"""
 
         try:
-            result = self._call_json(prompt, system=system, temperature=0.1, max_tokens=2560)
+            result = self._call_json(
+                prompt, system=system, temperature=0.1,
+                max_tokens=2048,              # down from 2560 — JSON output is compact
+                call_name="validate_summarize",
+                thinking_budget=2048,         # validation needs less reasoning depth than report
+            )
             # Ensure tldr is present; fall back to reasoning if missing
             if not result.get("tldr"):
                 result["tldr"] = result.get("reasoning", "")
