@@ -37,7 +37,7 @@ if sys.platform == 'win32':
 
 from company_selector import CompanySelector
 from research_agent import ResearchAgent
-from summarization_agent import SummarizationAgent
+from summarization_agent import SummarizationAgent, RiskProfile
 
 app = FastAPI(title="Stock Research Tool API", version="2.1.0")
 
@@ -63,6 +63,11 @@ _config: Dict = {
     "model":          "models/gemini-2.5-flash",
     "key_status":     "unknown",   # "active" | "invalid" | "unknown"
     "key_label":      "",          # masked display e.g. "AIza…SxI"
+    "risk_profile": {              # investor risk profile — persists in memory
+        "return_hurdle":        3,  # 1=need 60%+, 3=40%, 5=25%+
+        "governance_tolerance": 3,  # 1=zero tolerance, 5=lenient
+        "business_maturity":    3,  # 1=proven only, 5=early-stage OK
+    },
 }
 
 # Cumulative token usage across all sessions
@@ -179,6 +184,11 @@ class CompanyInfo(BaseModel):
 
 class UpdateApiKeyRequest(BaseModel):
     api_key: str
+
+class RiskProfileRequest(BaseModel):
+    return_hurdle:        int  # 1-5
+    governance_tolerance: int  # 1-5
+    business_maturity:    int  # 1-5
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
@@ -329,6 +339,35 @@ async def update_api_key(req: UpdateApiKeyRequest):
         "model":     _config["model"],
         "message":   "API key verified and applied. System ready.",
     }
+
+
+# ── Risk profile endpoints ─────────────────────────────────────────────────
+
+@app.get("/settings/risk-profile")
+async def get_risk_profile():
+    """Return the current investor risk profile with derived labels."""
+    rp = RiskProfile.from_dict(_config["risk_profile"])
+    return rp.to_dict()
+
+
+@app.post("/settings/risk-profile")
+async def update_risk_profile(req: RiskProfileRequest):
+    """Update the investor risk profile. Changes take effect on the next research job."""
+    for val, name in [
+        (req.return_hurdle,        "return_hurdle"),
+        (req.governance_tolerance, "governance_tolerance"),
+        (req.business_maturity,    "business_maturity"),
+    ]:
+        if not (1 <= val <= 5):
+            raise HTTPException(status_code=400, detail=f"{name} must be between 1 and 5")
+
+    _config["risk_profile"] = {
+        "return_hurdle":        req.return_hurdle,
+        "governance_tolerance": req.governance_tolerance,
+        "business_maturity":    req.business_maturity,
+    }
+    rp = RiskProfile.from_dict(_config["risk_profile"])
+    return {**rp.to_dict(), "message": "Risk profile updated"}
 
 
 # ── Token stats endpoint ───────────────────────────────────────────────────
@@ -484,7 +523,8 @@ async def _run_workflow(research_id: str, company_data: Dict):
         "message": "Generating analyst report with Gemini…",
     }
 
-    summ = SummarizationAgent(gemini_api_key=gemini_key, model=_config["model"])
+    rp   = RiskProfile.from_dict(_config["risk_profile"])
+    summ = SummarizationAgent(gemini_api_key=gemini_key, model=_config["model"], risk_profile=rp)
     research_data = summ.load_research_outputs(RESEARCH_OUTPUT_DIR, company_name)
     if not research_data:
         raise Exception("No research data found — cannot generate report")

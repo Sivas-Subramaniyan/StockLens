@@ -2,14 +2,72 @@
 Summarization and Validation Agent
 Uses Google Gemini 2.5 Flash (free tier) to generate analyst reports and validate buy/avoid decisions.
 Optimised for free tier: 10 RPM. Tracks token usage per session.
+
+Risk Profile:
+  All analyst prompts are dynamically adjusted by a RiskProfile that captures
+  the investor's appetite across three orthogonal dimensions:
+    1. return_hurdle      — minimum 3-year return required to trigger BUY (1=60%+, 5=25%+)
+    2. governance_tolerance — tolerance for red flags / governance issues (1=zero, 5=lenient)
+    3. business_maturity  — minimum business track-record required (1=proven only, 5=early stage OK)
 """
 
 import json
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
 from datetime import datetime
+
+
+# ── Risk Profile ───────────────────────────────────────────────────────────────
+
+@dataclass
+class RiskProfile:
+    """
+    Three-parameter investor risk profile.  Each dimension runs 1 (conservative)
+    to 5 (aggressive).  The default (3, 3, 3) reproduces the original prompts.
+    """
+    return_hurdle:         int = 3   # 1=need 60%+ return, 3=40%, 5=25%+
+    governance_tolerance:  int = 3   # 1=zero tolerance, 3=moderate, 5=growth > governance
+    business_maturity:     int = 3   # 1=proven track record only, 3=balanced, 5=early-stage OK
+
+    # ── Derived helpers ────────────────────────────────────────────────────
+    @property
+    def return_threshold_pct(self) -> int:
+        """3-year return % that must be 'highly probable' for a BUY."""
+        return {1: 60, 2: 50, 3: 40, 4: 32, 5: 25}[self.return_hurdle]
+
+    @property
+    def appetite_score(self) -> float:
+        return (self.return_hurdle + self.governance_tolerance + self.business_maturity) / 3
+
+    @property
+    def appetite_label(self) -> str:
+        s = self.appetite_score
+        if s <= 1.5: return "Ultra-Conservative"
+        if s <= 2.4: return "Conservative"
+        if s <= 3.5: return "Balanced"
+        if s <= 4.2: return "Aggressive"
+        return "Speculative"
+
+    def to_dict(self) -> Dict:
+        return {
+            "return_hurdle":        self.return_hurdle,
+            "governance_tolerance": self.governance_tolerance,
+            "business_maturity":    self.business_maturity,
+            "return_threshold_pct": self.return_threshold_pct,
+            "appetite_label":       self.appetite_label,
+            "appetite_score":       round(self.appetite_score, 2),
+        }
+
+    @staticmethod
+    def from_dict(d: Dict) -> "RiskProfile":
+        return RiskProfile(
+            return_hurdle=        int(d.get("return_hurdle",        3)),
+            governance_tolerance= int(d.get("governance_tolerance", 3)),
+            business_maturity=    int(d.get("business_maturity",    3)),
+        )
 
 # Fix Windows encoding
 if sys.platform == 'win32':
@@ -36,11 +94,13 @@ class SummarizationAgent:
         "models/gemini-flash-latest",
     ]
 
-    def __init__(self, gemini_api_key: str, model: str = DEFAULT_MODEL):
+    def __init__(self, gemini_api_key: str, model: str = DEFAULT_MODEL,
+                 risk_profile: RiskProfile = None):
         from google import genai
         self._client = genai.Client(api_key=gemini_api_key)
         self.model = model
         self._last_call_time = 0.0
+        self.risk_profile = risk_profile or RiskProfile()   # default = Balanced
 
         # Token usage tracking for this session
         self._token_stats: Dict = {
@@ -179,6 +239,132 @@ class SummarizationAgent:
                 print(f"Error loading {f}: {e}")
         return research_data
 
+    # ── Risk-aware prompt builders ───────────────────────────────────────
+    def _build_analyst_system(self) -> str:
+        """
+        Build the system prompt for create_analyst_report() based on the
+        investor's risk profile.
+
+        Parameter → prompt effect:
+          return_hurdle      : how selective the BUY stance is
+          governance_tolerance: how strictly governance issues trigger AVOID
+          business_maturity  : what stage / track-record is required
+        """
+        rp = self.risk_profile
+        rt = rp.return_threshold_pct
+
+        # ── Stance (driven by return_hurdle) ──────────────────────────────
+        if rp.return_hurdle <= 2:
+            stance = (
+                "You are a STRICT and HIGHLY SELECTIVE equity research analyst for Indian smallcaps. "
+                f"Default to AVOID unless evidence is OVERWHELMING. A BUY requires high probability of "
+                f"{rt}%+ return in 3 years — a very high bar. Most companies should be AVOID."
+            )
+        elif rp.return_hurdle == 3:
+            stance = (
+                "You are a STRICT and CRITICAL equity research analyst for Indian smallcaps. "
+                f"Default to AVOID unless evidence strongly supports BUY. "
+                f"The return bar is {rt}%+ in 3 years. Prioritise risk management over upside."
+            )
+        else:
+            stance = (
+                "You are a GROWTH-ORIENTED equity research analyst for Indian smallcaps. "
+                f"Be open to BUY when the risk/reward is favourable at {rt}%+ in 3 years. "
+                f"Identify opportunities while remaining alert to material risks."
+            )
+
+        # ── Governance emphasis (driven by governance_tolerance) ───────────
+        if rp.governance_tolerance <= 2:
+            gov = (
+                "Governance, promoter integrity, and regulatory compliance are NON-NEGOTIABLE. "
+                "ANY red flag — promoter pledging, related-party transactions, SEBI notices, "
+                "audit qualifications, or insider selling — is an automatic AVOID."
+            )
+        elif rp.governance_tolerance == 3:
+            gov = (
+                "Prioritise fraud detection, governance red flags, and regulatory compliance. "
+                "Material governance concerns should lead to AVOID. "
+                "Minor issues should be flagged but weighed proportionally."
+            )
+        else:
+            gov = (
+                "Note governance concerns but weigh them against growth potential. "
+                "Only serious, proven fraud or ongoing SEBI enforcement actions are disqualifying. "
+                "Manageable governance issues can be accepted in high-growth stories."
+            )
+
+        # ── Business maturity (driven by business_maturity) ───────────────
+        if rp.business_maturity <= 2:
+            maturity = (
+                "Focus ONLY on businesses with a proven 5+ year track record, consistent profitability, "
+                "and a well-established competitive moat. "
+                "Reject turnaround stories, pre-profit companies, and unproven business models."
+            )
+        elif rp.business_maturity == 3:
+            maturity = (
+                "Consider both established businesses and growing companies with emerging competitive advantages. "
+                "Some track record is required; pure speculative plays should be avoided."
+            )
+        else:
+            maturity = (
+                "Emerging and high-growth businesses are acceptable. "
+                "Future earnings potential and addressable market matter as much as current profitability. "
+                "Early-stage companies with strong fundamentals and large TAM can be considered for BUY."
+            )
+
+        return f"{stance} {gov} {maturity}"
+
+    def _build_validation_rules(self) -> str:
+        """
+        Build the BUY / AVOID decision rules for validate_and_summarize()
+        based on the investor's risk profile.
+        """
+        rp = self.risk_profile
+        rt = rp.return_threshold_pct
+
+        # BUY criteria tighten as return_hurdle rises
+        if rp.return_hurdle <= 2:
+            buy_rule = (
+                f"BUY: near-certain fundamentals, zero material red flags, dominant moat, "
+                f"{rt}%+ return probability HIGH and well-evidenced."
+            )
+        elif rp.return_hurdle == 3:
+            buy_rule = (
+                f"BUY: strong financials, no material red flags, clear moat, "
+                f"{rt}%+ return highly probable."
+            )
+        else:
+            buy_rule = (
+                f"BUY: reasonable financials, manageable risks, identifiable growth driver, "
+                f"{rt}%+ return plausible."
+            )
+
+        # AVOID criteria tighten as governance_tolerance falls
+        avoid_extras = []
+        if rp.governance_tolerance <= 2:
+            avoid_extras.append("any governance concern, promoter pledging, or related-party issue")
+        if rp.business_maturity <= 2:
+            avoid_extras.append("unproven business model or inconsistent earnings history")
+        if rp.return_hurdle <= 2:
+            avoid_extras.append("any uncertainty about the return path")
+
+        if avoid_extras:
+            avoid_rule = (
+                f"AVOID: weak financials, uncertain upside, OR {', OR '.join(avoid_extras)}. "
+                "When in doubt → AVOID."
+            )
+        elif rp.governance_tolerance >= 4 and rp.business_maturity >= 4:
+            avoid_rule = (
+                "AVOID: only if fundamental financial weakness, proven fraud, "
+                "or structural business failure makes the return case untenable."
+            )
+        else:
+            avoid_rule = (
+                "AVOID: material risk, weak financials, or uncertain upside. When in doubt → AVOID."
+            )
+
+        return f"- {buy_rule}\n- {avoid_rule}"
+
     # ── Build research text ──────────────────────────────────────────────
     def _research_to_text(self, research_data: Dict, max_chars: int = 60_000,
                           max_items: int = 5, excerpt_chars: int = 150,
@@ -228,14 +414,18 @@ class SummarizationAgent:
                                research_data: Dict) -> str:
         research_text  = self._research_to_text(research_data)
         financial_text = self._financial_to_text(financial_data)
+        rt = self.risk_profile.return_threshold_pct
 
-        system = (
-            "You are a STRICT and CRITICAL equity research analyst specialising in Indian smallcap stocks. "
-            "Default to AVOID unless there is OVERWHELMING evidence for BUY. "
-            "Prioritise risk management, fraud detection, and governance over potential upside."
-        )
+        # System prompt is fully driven by the investor's risk profile
+        system = self._build_analyst_system()
 
         prompt = f"""Create a comprehensive analyst report for **{company_name}**.
+
+## Investor Risk Profile
+- Appetite: {self.risk_profile.appetite_label}
+- Return hurdle: {rt}%+ in 3 years required for BUY
+- Governance tolerance: {self.risk_profile.governance_tolerance}/5
+- Business maturity required: {self.risk_profile.business_maturity}/5
 
 ## Financial Data
 {financial_text}
@@ -244,13 +434,12 @@ class SummarizationAgent:
 {research_text}
 
 ## Instructions
-1. Open with a bold **BUY** or **AVOID** recommendation.
-2. Default to AVOID unless evidence strongly supports BUY.
-3. Prioritise risk analysis first: fraud, SEBI actions, governance, accounting issues, promoter pledging.
-4. Cover each research category systematically.
-5. Assess 40%+ return probability in 3 years — be conservative.
-6. Use markdown with clear headings. Cite source domains where possible.
-7. Weaknesses and risks FIRST, then strengths."""
+1. Open with a bold **BUY** or **AVOID** recommendation aligned to this investor's risk profile.
+2. Prioritise risk analysis first: fraud, SEBI actions, governance, accounting issues, promoter pledging.
+3. Cover each research category systematically.
+4. Assess {rt}%+ return probability in 3 years — calibrate to the investor's stated appetite.
+5. Use markdown with clear headings. Cite source domains where possible.
+6. Weaknesses and risks FIRST, then strengths."""
 
         try:
             return self._call_text(prompt, system=system, temperature=0.2, max_tokens=8192)
@@ -260,18 +449,23 @@ class SummarizationAgent:
     # ── Validate buy/avoid (1 Gemini call, JSON) ────────────────────────
     def validate_buy_avoid(self, company_name: str, financial_data: Dict,
                             research_data: Dict, report: str) -> Dict:
+        """Standalone validation — used by research_orchestrator. Prefer validate_and_summarize."""
         research_text  = self._research_to_text(research_data, max_chars=20_000,
                                                 max_items=3, excerpt_chars=100,
                                                 full_content_chars=150)
         report_snippet = report[:6000] + "…[truncated]" if len(report) > 6000 else report
-        fd = financial_data
+        fd  = financial_data
+        rt  = self.risk_profile.return_threshold_pct
+        rules = self._build_validation_rules()
 
-        system = (
-            "You are a STRICT quantitative analyst for Indian equities. "
-            "Default to AVOID when uncertain. Prioritise risk over upside."
-        )
+        system = self._build_analyst_system()
 
         prompt = f"""Evaluate **{company_name}** for a BUY / AVOID decision.
+
+## Investor Risk Profile: {self.risk_profile.appetite_label}
+- Return hurdle: {rt}%+ in 3 years
+- Governance tolerance: {self.risk_profile.governance_tolerance}/5
+- Business maturity required: {self.risk_profile.business_maturity}/5
 
 ## Key Financials
 - Market Cap: {fd.get('market_cap', 'N/A')} Cr  |  P/E: {fd.get('pe_ratio', 'N/A')}
@@ -288,16 +482,15 @@ class SummarizationAgent:
 ## Analyst Report
 {report_snippet}
 
-## Rules
-- BUY: strong financials, no material red flags, clear moat, 40%+ return highly probable.
-- AVOID: any material risk, fraud, weak financials, uncertain upside. When in doubt → AVOID.
+## Decision Rules
+{rules}
 
 Return JSON with exactly these keys:
 {{
   "recommendation": "BUY" or "AVOID",
   "confidence": "high" or "medium" or "low",
   "expected_return_3y": "e.g. 45% or N/A",
-  "probability_40pct_return": "high or medium or low",
+  "probability_{rt}pct_return": "high or medium or low",
   "key_drivers": ["driver1"],
   "key_risks": ["risk1"],
   "red_flags_found": ["flag1"],
@@ -346,14 +539,18 @@ Output ONLY the paragraph — no headings, no markdown, no extra text."""
         """
         research_text  = self._research_to_text(research_data, max_chars=25_000)
         report_snippet = report[:6000] + "…[truncated]" if len(report) > 6000 else report
-        fd = financial_data
+        fd    = financial_data
+        rt    = self.risk_profile.return_threshold_pct
+        rules = self._build_validation_rules()
 
-        system = (
-            "You are a STRICT quantitative analyst for Indian equities. "
-            "Default to AVOID when uncertain. Prioritise capital preservation over upside."
-        )
+        system = self._build_analyst_system()
 
         prompt = f"""Evaluate **{company_name}** for a BUY / AVOID decision AND write a concise executive summary.
+
+## Investor Risk Profile: {self.risk_profile.appetite_label}
+- Return hurdle: {rt}%+ in 3 years
+- Governance tolerance: {self.risk_profile.governance_tolerance}/5
+- Business maturity required: {self.risk_profile.business_maturity}/5
 
 ## Key Financials
 - Market Cap: {fd.get('market_cap', 'N/A')} Cr  |  P/E: {fd.get('pe_ratio', 'N/A')}
@@ -371,21 +568,20 @@ Output ONLY the paragraph — no headings, no markdown, no extra text."""
 {report_snippet}
 
 ## Decision Rules
-- BUY only if: strong financials, no material red flags, clear moat, 40%+ return highly probable.
-- AVOID if: any material risk, fraud, governance issues, uncertain upside. When in doubt → AVOID.
+{rules}
 
 Return ONLY valid JSON with exactly these keys:
 {{
   "recommendation": "BUY" or "AVOID",
   "confidence": "high" or "medium" or "low",
   "expected_return_3y": "e.g. 45% or N/A",
-  "probability_40pct_return": "high or medium or low",
+  "probability_{rt}pct_return": "high or medium or low",
   "key_drivers": ["driver1", "driver2"],
   "key_risks": ["risk1", "risk2"],
   "red_flags_found": ["flag1"],
   "financial_concerns": ["concern1"],
-  "reasoning": "2-3 sentence explanation of the decision",
-  "tldr": "3-5 sentence professional executive summary. State the recommendation upfront, give the key rationale, mention expected return and confidence level."
+  "reasoning": "2-3 sentence explanation calibrated to the investor's {self.risk_profile.appetite_label} risk appetite",
+  "tldr": "3-5 sentence professional executive summary for a {self.risk_profile.appetite_label} investor. State the recommendation upfront, give the key rationale, mention expected return and confidence level."
 }}"""
 
         try:

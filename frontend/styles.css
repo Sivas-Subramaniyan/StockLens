@@ -1349,6 +1349,137 @@ tbody td {
   color: var(--text);
 }
 
+/* ── Risk Appetite Barometer ────────────────────────────── */
+
+/* Appetite gauge pill */
+.appetite-gauge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.ag-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text3);
+}
+.ag-pill {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 3px 14px;
+  border-radius: 20px;
+  transition: all 0.3s;
+}
+/* Appetite levels — colour-coded */
+.ag-pill.ultra-conservative { background: rgba(59,130,246,0.15); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3); }
+.ag-pill.conservative        { background: rgba(14,165,233,0.15); color: #0ea5e9; border: 1px solid rgba(14,165,233,0.3); }
+.ag-pill.balanced            { background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }
+.ag-pill.aggressive          { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }
+.ag-pill.speculative         { background: rgba(239,68,68,0.15);  color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+
+/* Slider container */
+.risk-slider-wrap {
+  margin-bottom: 18px;
+}
+.rs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.rs-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.rs-value {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--accent);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 2px 10px;
+  border-radius: 10px;
+  transition: color 0.2s;
+}
+
+/* Gradient range track */
+.rs-track-wrap {
+  position: relative;
+  margin-bottom: 5px;
+}
+.risk-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  background: linear-gradient(
+    to right,
+    #3b82f6 0%,
+    #0ea5e9 25%,
+    #10b981 50%,
+    #f59e0b 75%,
+    #ef4444 100%
+  );
+  border: none;
+}
+.risk-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.risk-slider::-webkit-slider-thumb:hover {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 4px rgba(14,165,233,0.25);
+}
+.risk-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  cursor: pointer;
+}
+
+/* Tick marks (cosmetic) */
+.rs-track-wrap::after {
+  content: '· · · · ·';
+  position: absolute;
+  bottom: -4px;
+  left: 0;
+  right: 0;
+  text-align: justify;
+  font-size: 11px;
+  color: transparent;  /* just for spacing; actual dots via rs-ends */
+  pointer-events: none;
+}
+
+/* Min/max labels */
+.rs-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text3);
+  margin-top: 4px;
+}
+
 /* ── Responsive adjustments for new elements ───────────── */
 @media (max-width: 768px) {
   .badge-model { display: none; }

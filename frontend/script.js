@@ -67,6 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('saveKeyBtn').addEventListener('click', saveApiKey);
   document.getElementById('keyToggleVis').addEventListener('click', toggleKeyVisibility);
   document.getElementById('resetTokensBtn').addEventListener('click', resetTokens);
+  document.getElementById('saveRiskBtn').addEventListener('click', saveRiskProfile);
 
   // Inline API key banner (Research tab)
   document.getElementById('bannerSaveBtn').addEventListener('click', saveBannerKey);
@@ -169,6 +170,7 @@ function openDrawer() {
   document.getElementById('drawerOverlay').classList.add('open');
   fetchSettings();
   fetchTokenStats();
+  loadRiskProfile();
 }
 function closeDrawer() {
   document.getElementById('settingsDrawer').classList.remove('open');
@@ -751,6 +753,91 @@ async function saveBannerKey() {
   } finally {
     btn.disabled    = false;
     btn.textContent = 'Activate';
+  }
+}
+
+// ── Risk Appetite Barometer ───────────────────────────────
+
+const RR_LABELS = { 1: '60%+ in 3Y', 2: '50%+ in 3Y', 3: '40%+ in 3Y', 4: '32%+ in 3Y', 5: '25%+ in 3Y' };
+const GT_LABELS = { 1: 'Zero tolerance', 2: 'Very strict', 3: 'Moderate', 4: 'Flexible', 5: 'Lenient' };
+const BM_LABELS = { 1: 'Proven only', 2: 'Conservative', 3: 'Balanced', 4: 'Growth-ready', 5: 'Early-stage OK' };
+
+const APPETITE_CLASS = {
+  'Ultra-Conservative': 'ultra-conservative',
+  'Conservative':       'conservative',
+  'Balanced':           'balanced',
+  'Aggressive':         'aggressive',
+  'Speculative':        'speculative',
+};
+
+function appetiteLabel(rr, gt, bm) {
+  const s = (rr + gt + bm) / 3;
+  if (s <= 1.5) return 'Ultra-Conservative';
+  if (s <= 2.4) return 'Conservative';
+  if (s <= 3.5) return 'Balanced';
+  if (s <= 4.2) return 'Aggressive';
+  return 'Speculative';
+}
+
+function onSliderChange() {
+  const rr = parseInt(document.getElementById('sliderRR').value);
+  const gt = parseInt(document.getElementById('sliderGT').value);
+  const bm = parseInt(document.getElementById('sliderBM').value);
+
+  document.getElementById('rrValue').textContent = RR_LABELS[rr] || rr;
+  document.getElementById('gtValue').textContent = GT_LABELS[gt] || gt;
+  document.getElementById('bmValue').textContent = BM_LABELS[bm] || bm;
+
+  const label = appetiteLabel(rr, gt, bm);
+  const pill  = document.getElementById('appetitePill');
+  if (pill) {
+    pill.textContent  = label;
+    pill.className    = 'ag-pill ' + (APPETITE_CLASS[label] || 'balanced');
+  }
+}
+
+async function loadRiskProfile() {
+  try {
+    const res  = await fetch(`${BASE}/settings/risk-profile`);
+    const data = await res.json();
+    document.getElementById('sliderRR').value = data.return_hurdle        || 3;
+    document.getElementById('sliderGT').value = data.governance_tolerance || 3;
+    document.getElementById('sliderBM').value = data.business_maturity    || 3;
+    onSliderChange();  // update labels + gauge
+  } catch { /* silent — server may not be up */ }
+}
+
+async function saveRiskProfile() {
+  const rr  = parseInt(document.getElementById('sliderRR').value);
+  const gt  = parseInt(document.getElementById('sliderGT').value);
+  const bm  = parseInt(document.getElementById('sliderBM').value);
+  const btn = document.getElementById('saveRiskBtn');
+  const txt = document.getElementById('saveRiskBtnText');
+  const fb  = document.getElementById('riskFeedback');
+
+  btn.disabled   = true;
+  txt.textContent = '⏳ Saving…';
+  fb.style.display = 'none';
+
+  try {
+    const res  = await fetch(`${BASE}/settings/risk-profile`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ return_hurdle: rr, governance_tolerance: gt, business_maturity: bm }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Save failed');
+
+    fb.textContent = `✓ Profile saved — ${data.appetite_label} (${data.return_threshold_pct}%+ return hurdle)`;
+    fb.className   = 'key-feedback success';
+    fb.style.display = 'block';
+  } catch (err) {
+    fb.textContent = `✗ ${err.message}`;
+    fb.className   = 'key-feedback error';
+    fb.style.display = 'block';
+  } finally {
+    btn.disabled    = false;
+    txt.textContent = 'Save Profile';
   }
 }
 

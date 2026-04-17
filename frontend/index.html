@@ -120,6 +120,76 @@
     <button class="btn btn-ghost btn-sm" id="resetTokensBtn" style="margin-top:10px">↺ Reset Counter</button>
   </div>
 
+  <!-- Risk Appetite Barometer -->
+  <div class="drawer-section">
+    <div class="ds-title">Risk Appetite</div>
+    <div class="ds-desc">
+      Calibrate how the AI analyst evaluates companies. Changes apply on the next research run.
+    </div>
+
+    <!-- Appetite gauge pill -->
+    <div class="appetite-gauge" id="appetiteGauge">
+      <span class="ag-label">Profile:</span>
+      <span class="ag-pill" id="appetitePill">Balanced</span>
+    </div>
+
+    <!-- Slider 1: Return Hurdle -->
+    <div class="risk-slider-wrap">
+      <div class="rs-header">
+        <span class="rs-name">Return Hurdle</span>
+        <span class="rs-value" id="rrValue">40%+ in 3Y</span>
+      </div>
+      <div class="rs-track-wrap">
+        <input type="range" class="risk-slider" id="sliderRR"
+               min="1" max="5" step="1" value="3"
+               oninput="onSliderChange()" />
+      </div>
+      <div class="rs-ends">
+        <span>60%+ needed</span>
+        <span>25%+ OK</span>
+      </div>
+    </div>
+
+    <!-- Slider 2: Governance Tolerance -->
+    <div class="risk-slider-wrap">
+      <div class="rs-header">
+        <span class="rs-name">Governance Tolerance</span>
+        <span class="rs-value" id="gtValue">Moderate</span>
+      </div>
+      <div class="rs-track-wrap">
+        <input type="range" class="risk-slider" id="sliderGT"
+               min="1" max="5" step="1" value="3"
+               oninput="onSliderChange()" />
+      </div>
+      <div class="rs-ends">
+        <span>Zero tolerance</span>
+        <span>Lenient</span>
+      </div>
+    </div>
+
+    <!-- Slider 3: Business Maturity -->
+    <div class="risk-slider-wrap">
+      <div class="rs-header">
+        <span class="rs-name">Business Maturity</span>
+        <span class="rs-value" id="bmValue">Balanced</span>
+      </div>
+      <div class="rs-track-wrap">
+        <input type="range" class="risk-slider" id="sliderBM"
+               min="1" max="5" step="1" value="3"
+               oninput="onSliderChange()" />
+      </div>
+      <div class="rs-ends">
+        <span>Proven only</span>
+        <span>Early-stage OK</span>
+      </div>
+    </div>
+
+    <button class="btn btn-primary btn-full" id="saveRiskBtn" style="margin-top:14px">
+      <span id="saveRiskBtnText">Save Profile</span>
+    </button>
+    <div class="key-feedback" id="riskFeedback" style="display:none"></div>
+  </div>
+
   <!-- Model info -->
   <div class="drawer-section">
     <div class="ds-title">Model</div>
