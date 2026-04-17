@@ -39,6 +39,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('reportViewer').style.display = 'none';
   });
 
+  // Share
+  document.getElementById('shareWABtn').addEventListener('click', shareOnWhatsApp);
+  document.getElementById('copyLinkBtn').addEventListener('click', copyPdfLink);
+
   // Reports tab
   document.getElementById('refreshReportsBtn').addEventListener('click', loadReports);
 
@@ -527,6 +531,8 @@ async function startResearch() {
 
     document.getElementById('progressPanel').style.display = 'block';
     document.getElementById('resultsPanel').style.display  = 'none';
+    const sp = document.getElementById('sharePanel');
+    if (sp) sp.style.display = 'none';
     document.getElementById('progressCompany').textContent = data.company_name;
     document.getElementById('jobId').textContent = `ID: ${data.research_id.slice(0,8)}…`;
     document.getElementById('progressFill').style.width = '0%';
@@ -619,14 +625,13 @@ function renderResults(data) {
   document.getElementById('verdictReturn').textContent = val.expected_return_3y || '—';
   document.getElementById('verdictProb').textContent   = val.probability_40pct_return || '—';
 
-  // Show tokens used for this job
   const tokensUsed = data.tokens_used;
   if (tokensUsed) {
     document.getElementById('verdictTokens').textContent =
       (tokensUsed.total_tokens || 0).toLocaleString();
   }
 
-  // Gap 4: show TLDR if available
+  // TLDR card
   const tldrCard = document.getElementById('tldrCard');
   const tldrText = document.getElementById('tldrText');
   if (data.tldr && tldrCard && tldrText) {
@@ -636,6 +641,19 @@ function renderResults(data) {
   } else if (tldrCard) {
     tldrCard.style.display = 'none';
   }
+
+  // Wire up PDF download button
+  const pdfUrl = `${BASE}/reports/pdf/${encodeURIComponent(currentCompany)}`;
+  const pdfBtn = document.getElementById('downloadPdfBtn');
+  if (pdfBtn) pdfBtn.href = pdfUrl;
+
+  // Show share panel
+  const sharePanel = document.getElementById('sharePanel');
+  if (sharePanel) sharePanel.style.display = 'block';
+
+  // Clear previous share hint
+  const hint = document.getElementById('shareHint');
+  if (hint) { hint.textContent = ''; hint.className = 'share-hint'; }
 }
 
 async function viewReport() {
@@ -754,6 +772,62 @@ async function saveBannerKey() {
     btn.disabled    = false;
     btn.textContent = 'Activate';
   }
+}
+
+// ── Share + PDF ───────────────────────────────────────────
+
+function _buildShareMessage() {
+  const company = currentCompany || 'this company';
+  const rec     = document.getElementById('verdictRec')?.textContent    || 'N/A';
+  const conf    = document.getElementById('verdictConf')?.textContent   || 'N/A';
+  const ret     = document.getElementById('verdictReturn')?.textContent || 'N/A';
+  const pdfUrl  = `${BASE}/reports/pdf/${encodeURIComponent(company)}`;
+  const appUrl  = BASE;
+  const msg =
+    `📊 *${company}* — StockLens AI Report\n` +
+    `Verdict: *${rec}* (${conf} confidence)\n` +
+    `Expected 3Y Return: ${ret}\n\n` +
+    `📄 Full PDF Report:\n${pdfUrl}\n\n` +
+    `🔍 Analyse more stocks free:\n${appUrl}`;
+  return { msg, pdfUrl };
+}
+
+function shareOnWhatsApp() {
+  const { msg } = _buildShareMessage();
+  // wa.me works on mobile (opens WhatsApp app) and desktop (opens WhatsApp Web)
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+  _setShareHint('Opening WhatsApp…', 'success');
+}
+
+async function copyPdfLink() {
+  const { pdfUrl } = _buildShareMessage();
+  const hint = document.getElementById('shareHint');
+  try {
+    await navigator.clipboard.writeText(pdfUrl);
+    _setShareHint('✓ PDF link copied to clipboard!', 'success');
+  } catch {
+    // Fallback for browsers without clipboard API
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = pdfUrl;
+      ta.style.position = 'fixed';
+      ta.style.opacity  = '0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      _setShareHint('✓ PDF link copied!', 'success');
+    } catch {
+      _setShareHint(`PDF link: ${pdfUrl}`, '');
+    }
+  }
+}
+
+function _setShareHint(msg, type) {
+  const hint = document.getElementById('shareHint');
+  if (!hint) return;
+  hint.textContent = msg;
+  hint.className   = `share-hint${type ? ' ' + type : ''}`;
 }
 
 // ── Risk Appetite Barometer ───────────────────────────────

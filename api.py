@@ -12,7 +12,7 @@ Improvements:
     the frontend Settings drawer to set the key at runtime.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +38,14 @@ if sys.platform == 'win32':
 from company_selector import CompanySelector
 from research_agent import ResearchAgent
 from summarization_agent import SummarizationAgent, RiskProfile
+
+# ── PDF generation (optional — graceful fallback if weasyprint not installed) ──
+try:
+    import markdown as _md
+    from weasyprint import HTML as _WeasyHTML
+    _PDF_AVAILABLE = True
+except Exception:
+    _PDF_AVAILABLE = False
 
 app = FastAPI(title="Stock Research Tool API", version="2.1.0")
 
@@ -82,6 +90,70 @@ _token_stats: Dict = {
 
 RESEARCH_OUTPUT_DIR = "research_output"
 REPORTS_DIR         = "reports"
+
+# ── PDF stylesheet ─────────────────────────────────────────────────────────
+_PDF_CSS = """
+@page {
+    size: A4;
+    margin: 18mm 22mm 22mm 22mm;
+    @top-right  { content: "StockLens AI Research Terminal"; font-size: 7pt; color: #94a3b8; }
+    @bottom-center { content: counter(page) " / " counter(pages); font-size: 7pt; color: #94a3b8; }
+}
+body  { font-family: Arial, 'Helvetica Neue', sans-serif; font-size: 10.5pt; line-height: 1.65; color: #1e293b; }
+h1    { font-size: 17pt; color: #0f172a; border-bottom: 2pt solid #3b82f6; padding-bottom: 7pt; margin: 0 0 14pt; }
+h2    { font-size: 13pt; color: #1e3a5f; border-bottom: 0.75pt solid #e2e8f0; padding-bottom: 5pt; margin: 18pt 0 9pt; page-break-after: avoid; }
+h3    { font-size: 11pt; color: #2d4a6b; font-weight: bold; margin: 12pt 0 6pt; page-break-after: avoid; }
+h4    { font-size: 10pt; color: #475569; font-weight: bold; margin: 10pt 0 4pt; }
+p     { margin: 0 0 8pt; }
+ul, ol { padding-left: 16pt; margin: 0 0 8pt; }
+li    { margin: 2pt 0; }
+strong { font-weight: bold; color: #0f172a; }
+em    { font-style: italic; color: #475569; }
+table { width: 100%; border-collapse: collapse; margin: 10pt 0; font-size: 9.5pt; page-break-inside: avoid; }
+th    { background: #1e3a5f; color: #ffffff; padding: 6pt 8pt; text-align: left; font-size: 8.5pt; font-weight: bold; }
+td    { padding: 5pt 8pt; border-bottom: 0.5pt solid #e2e8f0; vertical-align: top; }
+tr:nth-child(even) td { background: #f8fafc; }
+code  { font-family: 'Courier New', monospace; background: #f1f5f9; padding: 1pt 4pt; font-size: 8.5pt; color: #0e7490; }
+pre   { background: #f1f5f9; padding: 8pt; font-size: 8pt; margin: 8pt 0; white-space: pre-wrap; word-break: break-word; }
+pre code { background: none; padding: 0; }
+blockquote { border-left: 3pt solid #3b82f6; padding: 4pt 10pt; background: #eff6ff; margin: 8pt 0; color: #475569; font-style: italic; }
+hr    { border: none; border-top: 0.75pt solid #e2e8f0; margin: 14pt 0; }
+a     { color: #2563eb; text-decoration: none; }
+"""
+
+
+def _get_or_generate_pdf(company_name: str) -> Optional[Path]:
+    """
+    Generate a PDF from the latest markdown report for a company.
+    Caches the PDF alongside the .md file — only regenerates when .md is newer.
+    Returns None if weasyprint is not installed or no report exists.
+    """
+    if not _PDF_AVAILABLE:
+        return None
+    reports_dir = Path(REPORTS_DIR)
+    safe = "".join(c for c in company_name if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+    md_files = list(reports_dir.glob(f"{safe}_Analyst_Report_*.md")) if reports_dir.exists() else []
+    if not md_files:
+        return None
+    latest_md = max(md_files, key=lambda p: p.stat().st_mtime)
+    pdf_path  = latest_md.with_suffix(".pdf")
+    # Return cached PDF if it's at least as new as the markdown source
+    if pdf_path.exists() and pdf_path.stat().st_mtime >= latest_md.stat().st_mtime:
+        return pdf_path
+    # Generate
+    try:
+        md_text   = latest_md.read_text(encoding="utf-8")
+        html_body = _md.markdown(md_text, extensions=["tables", "fenced_code"])
+        full_html = (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<style>{_PDF_CSS}</style></head><body>{html_body}</body></html>"
+        )
+        _WeasyHTML(string=full_html).write_pdf(str(pdf_path))
+        print(f"[PDF] Generated: {pdf_path}")
+        return pdf_path
+    except Exception as e:
+        print(f"[PDF] Generation failed for {company_name}: {e}")
+        return None
 
 # ── Gap 5: Persistent job store ────────────────────────────────────────────
 JOBS_STORE_FILE = "research_jobs_store.json"
@@ -640,6 +712,67 @@ async def download_report(company_name: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reports/pdf/{company_name}")
+async def get_report_pdf(company_name: str, inline: bool = False):
+    """
+    Return the analyst report as a PDF.
+    Generated on first request and cached alongside the .md file.
+    ?inline=true serves it in-browser; default is attachment (download).
+    """
+    pdf = _get_or_generate_pdf(company_name)
+    if pdf is None:
+        if not _PDF_AVAILABLE:
+            raise HTTPException(
+                status_code=501,
+                detail="PDF generation is not available on this server (weasyprint not installed).",
+            )
+        raise HTTPException(status_code=404, detail=f"No report found for: {company_name}")
+    disposition = "inline" if inline else "attachment"
+    return FileResponse(
+        path=str(pdf),
+        media_type="application/pdf",
+        filename=pdf.name,
+        headers={"Content-Disposition": f'{disposition}; filename="{pdf.name}"'},
+    )
+
+
+@app.get("/share/{company_name}")
+async def get_share_info(company_name: str, request: Request):
+    """
+    Return share metadata for a company report:
+    - PDF URL (absolute, usable in WhatsApp messages)
+    - App URL (the deployed base URL)
+    - Latest validation results for constructing the share message
+    """
+    base = str(request.base_url).rstrip("/")
+    safe = "".join(c for c in company_name if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+    pdf_url = f"{base}/reports/pdf/{company_name}"
+
+    # Try to find the most recent completed job for this company
+    rec, conf, ret = "N/A", "N/A", "N/A"
+    for job in sorted(
+        [j for j in research_jobs.values() if j.get("company_name", "").lower() == company_name.lower()
+         and j.get("status") == "completed"],
+        key=lambda j: j.get("completed_at", ""),
+        reverse=True,
+    ):
+        val = (job.get("results") or {}).get("validation") or {}
+        rec  = val.get("recommendation", "N/A")
+        conf = val.get("confidence", "N/A")
+        ret  = val.get("expected_return_3y", "N/A")
+        break
+
+    return {
+        "company_name": company_name,
+        "pdf_url":      pdf_url,
+        "app_url":      base,
+        "pdf_available": _PDF_AVAILABLE,
+        "recommendation": rec,
+        "confidence":     conf,
+        "expected_return_3y": ret,
+    }
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ services:
   - type: web
     name: stock-research-tool
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: DEBIAN_FRONTEND=noninteractive apt-get install -y -q libpango-1.0-0 libpangocairo-1.0-0 libharfbuzz0b libgdk-pixbuf2.0-0 libffi-dev && pip install -r requirements.txt
     startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GEMINI_API_KEY
