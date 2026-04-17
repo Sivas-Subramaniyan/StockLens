@@ -4,7 +4,7 @@ Performs web searches using DuckDuckGo (free) and accumulates evidence across 12
 
 Improvements:
   - Gap 1: Gemini generates optimised search queries (one API call, all categories at once)
-  - Gap 2: Top-2 URLs per query are fetched for full page content (not just snippets)
+  - Gap 2: Top-4 unique-domain URLs per query are fetched for full page content (not just snippets)
   - Gap 3: Per-category caching — already-searched categories are skipped on re-run
 """
 
@@ -36,7 +36,7 @@ class ResearchAgent:
 
     New in this version:
       - Gemini-generated search queries (gap 1)
-      - Full page content fetching for top 2 results per query (gap 2)
+      - Full page content fetching for top 4 unique-domain results per query (gap 2)
       - Per-category caching — skip categories already researched today (gap 3)
     """
 
@@ -275,24 +275,37 @@ Return ONLY valid JSON — no markdown fences, no extra text — in exactly this
     def search_web(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """
         DuckDuckGo search (10 results by default) + parallel full-page content
-        fetch for the top 2 URLs.
+        fetch for the top 4 results from UNIQUE domains.
 
-        URL fetches run concurrently (ThreadPoolExecutor, max 2 workers) so the
-        per-query overhead is ~3-5 s instead of ~8-10 s for sequential fetches.
+        Deduplicating by domain ensures breadth of sources — e.g. one result
+        from moneycontrol, one from economictimes, one from screener, one from
+        an analyst blog — rather than 4 articles from the same site.
+
+        Fetches run concurrently (ThreadPoolExecutor, max 4 workers) so the
+        per-query overhead stays similar to before despite fetching twice as many pages.
         """
         try:
             from ddgs import DDGS
             with DDGS() as ddgs:
                 raw = list(ddgs.text(query, max_results=max_results, timelimit="y"))
 
-            # Parallel-fetch full content for top 2 URLs
-            urls_to_fetch = [
-                r.get("href", "") for r in raw[:2]
-                if r.get("href", "").startswith("http")
-            ]
+            # Collect up to 4 URLs from distinct domains
+            seen_domains: set = set()
+            urls_to_fetch: List[str] = []
+            for r in raw:
+                url = r.get("href", "")
+                if not url.startswith("http"):
+                    continue
+                domain = self._extract_domain(url)
+                if domain and domain not in seen_domains:
+                    seen_domains.add(domain)
+                    urls_to_fetch.append(url)
+                if len(urls_to_fetch) >= 4:
+                    break
+
             fetched: Dict[str, str] = {}
             if urls_to_fetch:
-                with ThreadPoolExecutor(max_workers=2) as pool:
+                with ThreadPoolExecutor(max_workers=4) as pool:
                     future_to_url = {pool.submit(self._fetch_page_content, u): u
                                      for u in urls_to_fetch}
                     for fut in as_completed(future_to_url):
@@ -394,7 +407,7 @@ Return ONLY valid JSON — no markdown fences, no extra text — in exactly this
                 })
 
             try:
-                results = self.search_web(query, max_results=8)
+                results = self.search_web(query, max_results=10)
                 has_content = sum(1 for r in results if r.get("full_content"))
                 category_results["subtopics"][subtopic] = {
                     "query":          query,
