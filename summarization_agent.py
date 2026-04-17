@@ -98,10 +98,12 @@ class SummarizationAgent:
                  risk_profile: RiskProfile = None):
         from google import genai
         from google.genai import types as _t
-        # 3-minute timeout per request — prevents indefinite hangs on slow/stalled API calls
+        # HttpOptions.timeout is in milliseconds.
+        # 360 000 ms = 6 minutes — enough for a full thinking+report generation on the
+        # free tier while still surfacing truly hung requests instead of waiting forever.
         self._client = genai.Client(
             api_key=gemini_api_key,
-            http_options=_t.HttpOptions(timeout=180),
+            http_options=_t.HttpOptions(timeout=360_000),
         )
         self.model = model
         self._last_call_time = 0.0
